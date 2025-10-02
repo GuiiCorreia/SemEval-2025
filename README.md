@@ -245,8 +245,3 @@ User [Clarification]: "No, I meant, how do I set it up."
 2. **Balancear custo/performance**: Few-shot pode ser suficiente vs. fine-tuning
 3. **Validação humana**: 20 tarefas serão avaliadas por humanos (conforme paper)
 4. **Conformidade**: Não usar Mixtral 8x7B (usado na criação do dataset)
-
----
-
-**Status**: Pronto para implementação por fases
-**Próximo passo**: Escolher qual fase começar e definir modelos/ferramentas
