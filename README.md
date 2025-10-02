@@ -170,7 +170,7 @@ Os 7% de questões **Unanswerable** e 8% **Partially Answerable** precisam ser d
 
 ---
 
-### 5. **Tratamento de Question Types (Tabela 9)**
+### 5. **Tratamento de Question Types (Tabela 9 no paper)**
 
 #### 5.1 Follow-up Questions
 - Implementar memória conversacional efetiva
