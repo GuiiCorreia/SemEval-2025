@@ -8,11 +8,13 @@ from ragas.metrics import faithfulness, answer_relevancy, context_precision, con
 from judge_utils import *
 
 from langchain.chat_models import AzureChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain_openai.embeddings import AzureOpenAIEmbeddings
 
 from huggingface_client import HuggingFaceLLMClient
 from azure_openai_client import AzureOpenAIClient
+from openai_client import OpenAIClient
 
 from datasets import Dataset
 from typing import List, Optional, Any
@@ -170,15 +172,22 @@ def run_ragas_judges_local(judge_model, input_file, output_file):
 # ================================================
 # Compute RAGAS w/ OpenAI
 # ================================================
-def run_ragas_judges_openai(input_file, output_file, openai_key, azure_host):
+def run_ragas_judges_openai(input_file, output_file, openai_key, azure_host, provider="azure"):
 
-    llm = AzureChatOpenAI(
-        deployment_name="gpt-4o-mini-2024-07-18",
-        openai_api_base=azure_host,
-        openai_api_version="2024-09-01-preview",
-        openai_api_key=openai_key, 
-        timeout=120 
-    )
+    if provider == "openai":
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            api_key=openai_key,
+            timeout=120
+        )
+    else:  # Azure
+        llm = AzureChatOpenAI(
+            deployment_name="gpt-4o-mini-2024-07-18",
+            openai_api_base=azure_host,
+            openai_api_version="2024-09-01-preview",
+            openai_api_key=openai_key,
+            timeout=120
+        )
 
     # azure_embeddings = AzureOpenAIEmbeddings(
     #     openai_api_version="2024-08-01-preview",
@@ -240,15 +249,17 @@ def run_radbench_judge(judge_model, input_file, output_file):
     
     user_inputs = format_conversation_radbench(model_predictions)
     
-    if judge_model == "openai":
+    if judge_model in ["openai", "azure"]:
         model_name_lst = ['gpt-4o-mini-2024-07-18']
     else:
         model_name_lst = [judge_model]
     
     for model_name in model_name_lst:
         
-        if model_name.startswith("gpt-"):
+        if judge_model == "azure":
             client = AzureOpenAIClient('gpt-4o-mini-2024-07-18')
+        elif judge_model == "openai":
+            client = OpenAIClient('gpt-4o-mini')
         else:
             clear_cuda()
             client = HuggingFaceLLMClient(model_name)
@@ -284,8 +295,10 @@ def run_radbench_judge(judge_model, input_file, output_file):
 # ================================================
 def run_idk_judge(model_name, input_file, output_file):    
     
-    if model_name == "openai":
+    if model_name == "azure":
         client = AzureOpenAIClient('gpt-4o-mini-2024-07-18')
+    elif model_name == "openai":
+        client = OpenAIClient('gpt-4o-mini')
     else:
         clear_cuda()
         client = HuggingFaceLLMClient(model_name)
@@ -299,7 +312,7 @@ def run_idk_judge(model_name, input_file, output_file):
     
     response_lst = []
     for cur_prompt in tqdm(formatted_conversations):
-        if model_name == "openai":
+        if model_name in ["openai", "azure"]:
             response = client.generate_response(cur_prompt)
         else:
             response = client.generate_response(cur_prompt, max_new_tokens = 3)

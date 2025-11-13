@@ -23,4 +23,5 @@ dependencies = [
     "bitsandbytes==0.47.0",
     "pydantic==2.11.7",
     "flash-attn==2.8.3",
+    "python-dotenv>=1.2.1",
 ]
