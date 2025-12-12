@@ -19,6 +19,7 @@ class EmbeddingConfig:
     task_type: str = "retrieval_document"
     api_key: Optional[str] = None
     provider: str = "gemini"  # gemini, huggingface, openai
+    batch_size: int = 100  # Batch size for embedding multiple documents
     
     
 @dataclass

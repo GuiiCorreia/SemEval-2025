@@ -48,7 +48,18 @@ def main():
         type=str,
         help='Path to YAML configuration file'
     )
-    
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=100,
+        help='Batch size for embedding documents'
+    )
+    parser.add_argument(
+        '--bm25-only',
+        action='store_true',
+        help='Index only BM25 (skip dense vector indexing)'
+    )
+
     args = parser.parse_args()
     
     # Check if corpus file exists
@@ -82,10 +93,17 @@ def main():
         if args.config:
             print(f"Using configuration file: {args.config}")
         pipeline = create_pipeline(args.config)
+
+        # Override batch size if specified
+        if args.batch_size:
+            pipeline.vector_store.embedding_service.config.batch_size = args.batch_size
+            print(f"Using batch size: {args.batch_size}")
         
-        # Setup collection (indexes both vector and BM25)
+        # Setup collection (indexes both vector and BM25, or BM25-only)
         print(f"\nIndexing collection {args.collection}...")
-        success = pipeline.setup_collection(args.collection, args.corpus)
+        if args.bm25_only:
+            print("BM25-only mode enabled")
+        success = pipeline.setup_collection(args.collection, args.corpus, bm25_only=args.bm25_only)
         
         if success:
             print(f"\n✓ Successfully indexed collection {args.collection}!")

@@ -5,13 +5,41 @@ This module implements different embedding providers using dependency injection.
 """
 
 import os
+import time
 from abc import ABC, abstractmethod
 from typing import List
 from dotenv import load_dotenv
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception,
+    before_sleep_log,
+    after_log
+)
+import logging
 from .config import EmbeddingConfig
 
 # Load environment variables
 load_dotenv()
+
+# Setup logging
+logger = logging.getLogger(__name__)
+
+
+def is_rate_limit_error(exception):
+    """Check if exception is a rate limit or quota error"""
+    error_str = str(exception).lower()
+    return any([
+        '429' in error_str,
+        'rate limit' in error_str,
+        'quota' in error_str,
+        'resource exhausted' in error_str,
+        'resource_exhausted' in error_str,
+        'too many requests' in error_str,
+        'service unavailable' in error_str,
+        '503' in error_str,
+    ])
 
 
 class EmbeddingProvider(ABC):
@@ -47,11 +75,18 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         self.types = types
         self.client = genai.Client(api_key=config.api_key or os.getenv("GEMINI_API_KEY"))
     
+    @retry(
+        retry=retry_if_exception(is_rate_limit_error),
+        stop=stop_after_attempt(10),
+        wait=wait_exponential(multiplier=2, min=4, max=300),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def embed_text(self, text: str, task_type: str = None) -> List[float]:
-        """Embed text using Gemini"""
+        """Embed text using Gemini with retry on rate limits"""
         if task_type is None:
             task_type = self.config.task_type
-            
+
         embedding = self.client.models.embed_content(
             model=self.config.model_id,
             contents=text,
@@ -62,13 +97,25 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         )
         return embedding.embeddings[0].values
     
+    @retry(
+        retry=retry_if_exception(is_rate_limit_error),
+        stop=stop_after_attempt(10),
+        wait=wait_exponential(multiplier=2, min=4, max=300),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Embed multiple documents"""
-        embeddings = []
-        for text in texts:
-            embedding = self.embed_text(text, task_type="retrieval_document")
-            embeddings.append(embedding)
-        return embeddings
+        """Embed multiple documents using batch processing with retry on rate limits"""
+        # Gemini API supports batch embedding
+        result = self.client.models.embed_content(
+            model=self.config.model_id,
+            contents=texts,
+            config=self.types.EmbedContentConfig(
+                task_type="retrieval_document",
+                output_dimensionality=self.config.dimension
+            )
+        )
+        return [emb.values for emb in result.embeddings]
     
     def embed_query(self, query: str) -> List[float]:
         """Embed query text"""

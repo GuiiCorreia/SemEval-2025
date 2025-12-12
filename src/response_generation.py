@@ -5,14 +5,42 @@ This module handles conditional response generation with guardrails.
 """
 
 import os
+import logging
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from google import genai
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception,
+    before_sleep_log
+)
 from .answerability import AnswerabilityType
 from .config import TextModelConfig
 
 # Load environment variables
 load_dotenv()
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+def is_api_error(exception):
+    """Check if exception is an API error that should be retried"""
+    error_str = str(exception).lower()
+    return any([
+        '429' in error_str,
+        'rate limit' in error_str,
+        'quota' in error_str,
+        'resource exhausted' in error_str,
+        'resource_exhausted' in error_str,
+        'too many requests' in error_str,
+        'service unavailable' in error_str,
+        '503' in error_str,
+        '500' in error_str,
+        'internal server error' in error_str,
+    ])
 
 
 class ResponseGenerator:
@@ -25,20 +53,27 @@ class ResponseGenerator:
         )
         self.client = genai.Client(api_key=self.config.api_key)
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def generate_complete_answer(
-        self, 
-        query: str, 
-        documents: List[Dict[str, Any]], 
+        self,
+        query: str,
+        documents: List[Dict[str, Any]],
         conversation_history: List[Dict[str, str]]
     ) -> str:
         """
         Generate a complete answer when query is fully answerable
-        
+
         Args:
             query: The reformulated query
             documents: Retrieved documents
             conversation_history: Previous conversation context
-            
+
         Returns:
             Generated complete answer
         """
@@ -48,12 +83,12 @@ class ResponseGenerator:
             speaker = msg.get('speaker', 'unknown')
             text = msg.get('text', '')
             history_text += f"{speaker}: {text}\n"
-        
+
         # Format documents
         docs_text = ""
         for i, doc in enumerate(documents):
             docs_text += f"Document {i+1}:\nTitle: {doc.get('title', 'N/A')}\nContent: {doc['text'][:800]}\n\n"
-        
+
         prompt = f"""You are a helpful assistant. Answer the question based ONLY on the provided documents and conversation context.
 
 Conversation Context:
@@ -66,7 +101,7 @@ Relevant Documents:
 
 Instructions:
 - Use only information from the provided documents
-- If information spans multiple documents, synthesize appropriately  
+- If information spans multiple documents, synthesize appropriately
 - Maintain conversational tone appropriate to the context
 - Be specific and cite relevant details
 - If the documents don't fully address the question, acknowledge limitations
@@ -88,20 +123,27 @@ Answer:"""
             print(f"Error generating complete answer: {e}")
             return "I apologize, but I'm unable to generate a response at this time due to a technical error."
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def generate_partial_answer(
-        self, 
-        query: str, 
-        documents: List[Dict[str, Any]], 
+        self,
+        query: str,
+        documents: List[Dict[str, Any]],
         conversation_history: List[Dict[str, str]]
     ) -> str:
         """
         Generate a partial answer when query is only partially answerable
-        
+
         Args:
             query: The reformulated query
             documents: Retrieved documents
             conversation_history: Previous conversation context
-            
+
         Returns:
             Generated partial answer with gaps explained
         """
@@ -109,7 +151,7 @@ Answer:"""
         docs_text = ""
         for i, doc in enumerate(documents):
             docs_text += f"Document {i+1}:\nTitle: {doc.get('title', 'N/A')}\nContent: {doc['text'][:800]}\n\n"
-        
+
         prompt = f"""Based on the provided documents, you can only partially answer the user's question.
 
 Question: {query}
@@ -141,18 +183,25 @@ Response:"""
             print(f"Error generating partial answer: {e}")
             return "I can only partially address your question based on the available information. However, I'm experiencing technical difficulties in generating a detailed response."
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def generate_clarification_request(
-        self, 
-        query: str, 
+        self,
+        query: str,
         conversation_history: List[Dict[str, str]]
     ) -> str:
         """
         Generate a clarification request when query is unanswerable
-        
+
         Args:
             query: The reformulated query
             conversation_history: Previous conversation context
-            
+
         Returns:
             Generated clarification request
         """
@@ -162,7 +211,7 @@ Response:"""
             speaker = msg.get('speaker', 'unknown')
             text = msg.get('text', '')
             history_text += f"{speaker}: {text}\n"
-        
+
         prompt = f"""The user has asked a question that cannot be adequately answered with the available documents.
 
 Conversation Context:
@@ -193,14 +242,21 @@ Clarification Request:"""
             print(f"Error generating clarification request: {e}")
             return "I don't have enough information to answer your question adequately. Could you please provide more context or clarify what specific information you're looking for?"
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def apply_guardrails(self, response: str, documents: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Apply quality guardrails to the generated response
-        
+
         Args:
             response: Generated response text
             documents: Source documents
-            
+
         Returns:
             Dictionary with response and quality scores
         """
@@ -208,7 +264,7 @@ Clarification Request:"""
         docs_text = ""
         for i, doc in enumerate(documents[:3]):  # Limit for context
             docs_text += f"Document {i+1}: {doc['text'][:500]}\n\n"
-        
+
         # Check faithfulness
         faithfulness_prompt = f"""Check if this response is faithful to the source documents:
 
@@ -222,7 +278,7 @@ Verify:
 
 Provide a faithfulness score from 0.0 to 1.0 and list any issues:
 
-Faithfulness Score: 
+Faithfulness Score:
 Issues Found:"""
 
         try:
@@ -234,12 +290,12 @@ Issues Found:"""
                     "max_output_tokens": 512
                 }
             )
-            
+
             # Parse faithfulness score
             faithfulness_text = faithfulness_response.text.strip()
             faithfulness_score = 0.8  # default
             faithfulness_issues = []
-            
+
             for line in faithfulness_text.split('\n'):
                 if 'score:' in line.lower():
                     try:
@@ -252,12 +308,12 @@ Issues Found:"""
                     issues_part = line.split(':', 1)[1].strip()
                     if issues_part and issues_part.lower() not in ['none', 'no issues']:
                         faithfulness_issues.append(issues_part)
-            
+
         except Exception as e:
             print(f"Error in faithfulness checking: {e}")
             faithfulness_score = 0.8
             faithfulness_issues = []
-        
+
         return {
             "response_text": response,
             "confidence_score": faithfulness_score,

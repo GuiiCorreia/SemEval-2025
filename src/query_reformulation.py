@@ -5,13 +5,41 @@ This module handles context-aware query reformulation and query diversification.
 """
 
 import os
+import logging
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from google import genai
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception,
+    before_sleep_log
+)
 from .config import QueryDiversificationConfig, TextModelConfig
 
 # Load environment variables
 load_dotenv()
+
+# Setup logging
+logger = logging.getLogger(__name__)
+
+
+def is_api_error(exception):
+    """Check if exception is an API error that should be retried"""
+    error_str = str(exception).lower()
+    return any([
+        '429' in error_str,
+        'rate limit' in error_str,
+        'quota' in error_str,
+        'resource exhausted' in error_str,
+        'resource_exhausted' in error_str,
+        'too many requests' in error_str,
+        'service unavailable' in error_str,
+        '503' in error_str,
+        '500' in error_str,
+        'internal server error' in error_str,
+    ])
 
 
 class QueryReformulator:
@@ -24,6 +52,13 @@ class QueryReformulator:
         )
         self.client = genai.Client(api_key=self.config.api_key)
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def cot_rewrite(self, query: str, conversation_history: List[Dict[str, str]]) -> str:
         """
         Rewrite query using Chain-of-Thought reasoning
@@ -104,6 +139,13 @@ class QueryDiversifier:
         )
         self.client = genai.Client(api_key=self.text_model_config.api_key)
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def entity_focus(self, query: str) -> str:
         """Generate entity-focused query variant"""
         prompt = f"""Generate an entity-focused variation of this query: {query}
@@ -127,6 +169,13 @@ Entity-focused query:"""
             print(f"Error in entity focus generation: {e}")
             return query
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def action_focus(self, query: str) -> str:
         """Generate action-focused query variant"""
         prompt = f"""Generate an action-focused variation of this query: {query}
@@ -150,6 +199,13 @@ Action-focused query:"""
             print(f"Error in action focus generation: {e}")
             return query
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def paraphrase(self, query: str) -> str:
         """Generate paraphrased query variant"""
         prompt = f"""Paraphrase this query while keeping the same meaning: {query}
@@ -172,6 +228,13 @@ Paraphrased query:"""
             print(f"Error in paraphrase generation: {e}")
             return query
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def relation_focus(self, query: str) -> str:
         """Generate relation-focused query variant"""
         prompt = f"""Generate a relationship-focused variation of this query: {query}

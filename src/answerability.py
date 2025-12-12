@@ -5,14 +5,42 @@ This module determines whether a query can be answered given the retrieved docum
 """
 
 import os
+import logging
 from typing import List, Dict, Any, Literal
 from enum import Enum
 from dotenv import load_dotenv
 from google import genai
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception,
+    before_sleep_log
+)
 from .config import TextModelConfig
 
 # Load environment variables
 load_dotenv()
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+def is_api_error(exception):
+    """Check if exception is an API error that should be retried"""
+    error_str = str(exception).lower()
+    return any([
+        '429' in error_str,
+        'rate limit' in error_str,
+        'quota' in error_str,
+        'resource exhausted' in error_str,
+        'resource_exhausted' in error_str,
+        'too many requests' in error_str,
+        'service unavailable' in error_str,
+        '503' in error_str,
+        '500' in error_str,
+        'internal server error' in error_str,
+    ])
 
 
 class AnswerabilityType(Enum):
@@ -32,25 +60,32 @@ class AnswerabilityDetector:
         )
         self.client = genai.Client(api_key=self.config.api_key)
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def classify(self, query: str, documents: List[Dict[str, Any]]) -> AnswerabilityType:
         """
         Classify whether the query can be answered using the retrieved documents
-        
+
         Args:
             query: The reformulated query
             documents: List of retrieved documents
-            
+
         Returns:
             AnswerabilityType indicating if query is answerable, partially answerable, or unanswerable
         """
         if not documents:
             return AnswerabilityType.UNANSWERABLE
-        
+
         # Format documents for the prompt
         docs_text = ""
         for i, doc in enumerate(documents[:5]):  # Limit to top 5 for context window
             docs_text += f"Document {i+1}:\nTitle: {doc.get('title', 'N/A')}\nContent: {doc['text'][:500]}...\n\n"
-        
+
         prompt = f"""Given the following query and retrieved documents, classify whether the query can be answered.
 
 Query: {query}
@@ -65,7 +100,7 @@ Classification options:
 
 Provide your classification and brief reasoning:
 
-Classification: 
+Classification:
 Reasoning:"""
 
         try:
@@ -77,9 +112,9 @@ Reasoning:"""
                     "max_output_tokens": 512
                 }
             )
-            
+
             response_text = response.text.strip().lower()
-            
+
             # Parse the classification from the response
             if "answerable" in response_text:
                 if "partial" in response_text or "partially" in response_text:
@@ -95,20 +130,27 @@ Reasoning:"""
             else:
                 # Default to answerable if we can't parse the response
                 return AnswerabilityType.ANSWERABLE
-                
+
         except Exception as e:
             print(f"Error in answerability classification: {e}")
             # Default to answerable on error
             return AnswerabilityType.ANSWERABLE
     
+    @retry(
+        retry=retry_if_exception(is_api_error),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     def get_classification_confidence(self, query: str, documents: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Get detailed classification with confidence and reasoning
-        
+
         Args:
             query: The reformulated query
             documents: List of retrieved documents
-            
+
         Returns:
             Dictionary with classification, confidence, and reasoning
         """
@@ -118,12 +160,12 @@ Reasoning:"""
                 "confidence": 1.0,
                 "reasoning": "No documents retrieved"
             }
-        
+
         # Format documents for the prompt
         docs_text = ""
         for i, doc in enumerate(documents[:5]):
             docs_text += f"Document {i+1}:\nTitle: {doc.get('title', 'N/A')}\nContent: {doc['text'][:500]}...\n\n"
-        
+
         prompt = f"""Given the following query and retrieved documents, classify whether the query can be answered and provide a confidence score.
 
 Query: {query}
@@ -150,14 +192,14 @@ Reasoning: [your reasoning]"""
                     "max_output_tokens": 512
                 }
             )
-            
+
             response_text = response.text.strip()
-            
+
             # Parse the response
             classification = AnswerabilityType.ANSWERABLE  # default
             confidence = 0.8  # default
             reasoning = "Could not parse response"
-            
+
             lines = response_text.split('\n')
             for line in lines:
                 if line.startswith('Classification:'):
@@ -176,13 +218,13 @@ Reasoning: [your reasoning]"""
                         confidence = 0.8
                 elif line.startswith('Reasoning:'):
                     reasoning = line.split(':', 1)[1].strip()
-            
+
             return {
                 "classification": classification,
                 "confidence": confidence,
                 "reasoning": reasoning
             }
-                
+
         except Exception as e:
             print(f"Error in detailed answerability classification: {e}")
             return {

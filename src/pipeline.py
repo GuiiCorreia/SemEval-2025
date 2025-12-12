@@ -118,27 +118,32 @@ class Pipeline:
         print("Pipeline processing complete!")
         return response
     
-    def setup_collection(self, collection_name: str, corpus_file: str) -> bool:
+    def setup_collection(self, collection_name: str, corpus_file: str, bm25_only: bool = False) -> bool:
         """
         Set up a document collection by indexing both vector and BM25
-        
+
         Args:
             collection_name: Name for the collection
             corpus_file: Path to corpus JSONL file
-            
+            bm25_only: If True, only index BM25 (skip vector indexing)
+
         Returns:
             True if setup was successful
         """
         print(f"Setting up collection {collection_name}...")
-        
-        # Index for vector search
-        print("Indexing for dense retrieval...")
-        vector_success = self.vector_store.index_corpus(collection_name, corpus_file)
-        
+
+        vector_success = True
+        if not bm25_only:
+            # Index for vector search
+            print("Indexing for dense retrieval...")
+            vector_success = self.vector_store.index_corpus(collection_name, corpus_file)
+        else:
+            print("Skipping dense retrieval indexing (BM25-only mode)")
+
         # Index for BM25 search
         print("Indexing for BM25 retrieval...")
         bm25_success = self.hybrid_retriever.index_corpus_bm25(collection_name, corpus_file)
-        
+
         if vector_success and bm25_success:
             print(f"Collection {collection_name} setup complete!")
             return True
