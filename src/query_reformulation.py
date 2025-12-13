@@ -61,14 +61,14 @@ class QueryReformulator:
     )
     def cot_rewrite(self, query: str, conversation_history: List[Dict[str, str]]) -> str:
         """
-        Rewrite query using Chain-of-Thought reasoning
-        
+        Rewrite query using contextual understanding optimized for hybrid retrieval
+
         Args:
             query: Current user question
             conversation_history: List of conversation messages
-            
+
         Returns:
-            Reformulated query
+            Reformulated standalone query
         """
         # Format conversation history
         history_text = ""
@@ -76,24 +76,43 @@ class QueryReformulator:
             speaker = msg.get('speaker', 'unknown')
             text = msg.get('text', '')
             history_text += f"{speaker}: {text}\n"
-        
-        prompt = f"""You are an expert at understanding conversational context and rewriting queries.
+
+        prompt = f"""You are a query reformulation module for a hybrid RAG retrieval system (BM25 + Dense Vector Search).
+
+Objective: Rewrite the current question into a self-contained search query that can retrieve relevant documents without needing conversation context.
 
 Conversation History:
 {history_text}
 
 Current Question: {query}
 
-Task: Rewrite the current question to be self-contained by:
-1. Identifying any pronouns or references that need context
-2. Finding what they refer to in the conversation history  
-3. Replacing them with explicit mentions
-4. Ensuring the rewritten query can be understood without the conversation context
+Internal reasoning (do not output):
+1. Identify pronouns, demonstratives, or implicit references (it, this, that, they, the one, etc.)
+2. Resolve coreferences using conversation history
+3. Replace references with explicit entity names, concepts, or descriptions
+4. Maintain the original information need and question type
+5. Optimize for keyword matching (BM25) and semantic search (vectors)
+6. If question is already self-contained, keep it unchanged
 
-Think step by step:
-Step 1: What pronouns/references need clarification?
-Step 2: What do they refer to based on the conversation?
-Step 3: How should I rewrite this to be self-contained?
+Strict output rules:
+- Output ONLY the rewritten query
+- No explanations, no reasoning steps, no markdown, no labels
+- One line only
+- Must be a valid standalone search query
+- Preserve domain-specific terminology
+- Use declarative retrieval-style when possible (prefer statements over questions)
+- Do NOT introduce information not implied by the conversation
+- Do NOT change the semantic intent of the question
+
+Examples:
+Conversation: "The Arizona Cardinals played in London." | Question: "When was that game?"
+→ Arizona Cardinals London game date
+
+Conversation: "The Patriots won the Super Bowl." | Question: "Who was their quarterback?"
+→ New England Patriots Super Bowl quarterback
+
+Conversation: "FEMA recommends disaster supplies." | Question: "What should be in it?"
+→ FEMA disaster supplies kit contents
 
 Rewritten Query:"""
 
@@ -102,21 +121,25 @@ Rewritten Query:"""
                 model=self.config.model_id,
                 contents=prompt,
                 config={
-                    "temperature": 0.2,  # Slightly higher for creativity in rewriting
-                    "max_output_tokens": 512
+                    "temperature": 0.4,  # Low temperature for consistency
+                    "max_output_tokens": 4096
                 }
             )
-            
-            # Extract just the rewritten query from the response
+
+            # Extract and clean the rewritten query
             full_response = response.text.strip()
-            if "Rewritten Query:" in full_response:
-                rewritten = full_response.split("Rewritten Query:")[-1].strip()
-            else:
-                # If the model doesn't follow the format, return the full response
-                rewritten = full_response
-            
-            return rewritten if rewritten else query
-            
+
+            # Remove common artifacts
+            result = full_response.replace('*', '').replace('#', '').replace('Rewritten Query:', '')
+
+            # Take only first line to avoid explanations
+            result = result.split('\n')[0].strip()
+
+            # Clean up quotes if present
+            result = result.strip('"').strip("'")
+
+            return result if result else query
+
         except Exception as e:
             print(f"Error in query reformulation: {e}")
             return query  # Return original query if reformulation fails
@@ -147,24 +170,42 @@ class QueryDiversifier:
         reraise=True
     )
     def entity_focus(self, query: str) -> str:
-        """Generate entity-focused query variant"""
-        prompt = f"""Generate an entity-focused variation of this query: {query}
+        """Generate entity-focused query variant optimized for hybrid retrieval"""
+        prompt = f"""You are a query generation module for a hybrid RAG retrieval system (BM25 + Dense Vector Search).
 
-Focus on the main entities (people, organizations, products, locations) mentioned.
-Make the query more specific about these entities.
+Objective: Generate ONE entity-focused search query optimized for retrieving relevant documents.
+
+Internal reasoning (do not output):
+- Identify explicit entities: people, organizations, products, locations, teams, technical terms
+- Extract proper nouns and named entities
+- Optimize for BM25 (keyword matching) and vector search (semantic similarity)
+
+Strict output rules:
+- Output ONLY the generated query
+- No explanations, no markdown, no labels
+- One line only
+- Must be a valid standalone search query
+- Prefer noun phrases and entity names
+- Avoid conversational language
+- Use declarative retrieval-style (not questions)
+
+Input question: {query}
 
 Entity-focused query:"""
-        
+
         try:
             response = self.client.models.generate_content(
                 model=self.text_model_config.model_id,
                 contents=prompt,
                 config={
-                    "temperature": 0.3,  # Higher temperature for diversity
-                    "max_output_tokens": 256
+                    "temperature": 0.4,
+                    "max_output_tokens": 4096
                 }
             )
-            return response.text.strip()
+            result = response.text.strip()
+            # Clean up any extra formatting
+            result = result.replace('*', '').replace('#', '').split('\n')[0].strip()
+            return result if result else query
         except Exception as e:
             print(f"Error in entity focus generation: {e}")
             return query
@@ -177,24 +218,42 @@ Entity-focused query:"""
         reraise=True
     )
     def action_focus(self, query: str) -> str:
-        """Generate action-focused query variant"""
-        prompt = f"""Generate an action-focused variation of this query: {query}
+        """Generate action-focused query variant optimized for hybrid retrieval"""
+        prompt = f"""You are a query generation module for a hybrid RAG retrieval system (BM25 + Dense Vector Search).
 
-Focus on the main actions, processes, or procedures mentioned.
-Make the query more specific about what actions are being asked about.
+Objective: Generate ONE action-focused search query optimized for retrieving relevant documents.
+
+Internal reasoning (do not output):
+- Identify main actions, events, processes, procedures, or operations
+- Extract verbs indicating activities (play, move, win, create, implement, etc.)
+- Focus on "what happened" or "how to do something"
+- Optimize for both keyword matching (BM25) and semantic search (vectors)
+
+Strict output rules:
+- Output ONLY the generated query
+- No explanations, no markdown, no labels
+- One line only
+- Must be a valid standalone search query
+- Emphasize action verbs and process descriptions
+- Avoid conversational language
+- Use declarative retrieval-style (not questions)
+
+Input question: {query}
 
 Action-focused query:"""
-        
+
         try:
             response = self.client.models.generate_content(
                 model=self.text_model_config.model_id,
                 contents=prompt,
                 config={
-                    "temperature": 0.3,  # Higher temperature for diversity
-                    "max_output_tokens": 256
+                    "temperature": 0.4,
+                    "max_output_tokens": 4096
                 }
             )
-            return response.text.strip()
+            result = response.text.strip()
+            result = result.replace('*', '').replace('#', '').split('\n')[0].strip()
+            return result if result else query
         except Exception as e:
             print(f"Error in action focus generation: {e}")
             return query
@@ -207,23 +266,43 @@ Action-focused query:"""
         reraise=True
     )
     def paraphrase(self, query: str) -> str:
-        """Generate paraphrased query variant"""
-        prompt = f"""Paraphrase this query while keeping the same meaning: {query}
+        """Generate paraphrased query variant optimized for hybrid retrieval"""
+        prompt = f"""You are a query generation module for a hybrid RAG retrieval system (BM25 + Dense Vector Search).
 
-Use different words and sentence structure but maintain the original intent.
+Objective: Generate ONE paraphrased search query optimized for retrieving relevant documents.
+
+Internal reasoning (do not output):
+- Rephrase using different words while maintaining semantic meaning
+- Use synonyms and alternative expressions
+- Vary sentence structure but keep information need constant
+- Optimize for semantic similarity (dense vectors) while preserving key terms (BM25)
+- Do NOT change entity names or proper nouns
+
+Strict output rules:
+- Output ONLY the generated query
+- No explanations, no markdown, no labels
+- One line only
+- Must be a valid standalone search query
+- Keep critical domain-specific terms unchanged
+- Avoid conversational language
+- Use declarative retrieval-style (not questions)
+
+Input question: {query}
 
 Paraphrased query:"""
-        
+
         try:
             response = self.client.models.generate_content(
                 model=self.text_model_config.model_id,
                 contents=prompt,
                 config={
-                    "temperature": 0.3,  # Higher temperature for diversity
-                    "max_output_tokens": 256
+                    "temperature": 0.4,  # Slightly higher for lexical diversity
+                    "max_output_tokens": 4096
                 }
             )
-            return response.text.strip()
+            result = response.text.strip()
+            result = result.replace('*', '').replace('#', '').split('\n')[0].strip()
+            return result if result else query
         except Exception as e:
             print(f"Error in paraphrase generation: {e}")
             return query
@@ -236,24 +315,42 @@ Paraphrased query:"""
         reraise=True
     )
     def relation_focus(self, query: str) -> str:
-        """Generate relation-focused query variant"""
-        prompt = f"""Generate a relationship-focused variation of this query: {query}
+        """Generate relation-focused query variant optimized for hybrid retrieval"""
+        prompt = f"""You are a query generation module for a hybrid RAG retrieval system (BM25 + Dense Vector Search).
 
-Focus on relationships, connections, or dependencies between concepts mentioned.
-Make the query more specific about how things relate to each other.
+Objective: Generate ONE relation-focused search query optimized for retrieving relevant documents.
+
+Internal reasoning (do not output):
+- Identify relationships, connections, dependencies, or comparisons between entities/concepts
+- Extract semantic relations: causes, enables, depends on, compares, belongs to, results in
+- Focus on "how X relates to Y" or "connection between X and Y"
+- Optimize for both keyword matching (BM25) and semantic relation understanding (vectors)
+
+Strict output rules:
+- Output ONLY the generated query
+- No explanations, no markdown, no labels
+- One line only
+- Must be a valid standalone search query
+- Emphasize relational verbs and connective phrases
+- Avoid conversational language
+- Use declarative retrieval-style (not questions)
+
+Input question: {query}
 
 Relation-focused query:"""
-        
+
         try:
             response = self.client.models.generate_content(
                 model=self.text_model_config.model_id,
                 contents=prompt,
                 config={
-                    "temperature": 0.3,  # Higher temperature for diversity
-                    "max_output_tokens": 256
+                    "temperature": 0.4,
+                    "max_output_tokens": 4096
                 }
             )
-            return response.text.strip()
+            result = response.text.strip()
+            result = result.replace('*', '').replace('#', '').split('\n')[0].strip()
+            return result if result else query
         except Exception as e:
             print(f"Error in relation focus generation: {e}")
             return query
