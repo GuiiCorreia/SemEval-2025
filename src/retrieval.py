@@ -65,12 +65,20 @@ class HybridRetriever:
         self.corpus_data = {}      # Collection name -> corpus documents
         self.bm25_index_dir = "bm25_indexes"  # Directory to save BM25 indexes
 
-        # Load Jina API key from environment
-        self.jina_api_key = os.getenv("JINA_API_KEY")
-        if self.jina_api_key:
-            print("✓ Jina API key loaded for reranking")
+        # Load all Jina API keys from environment (supports multiple keys for rotation)
+        self.jina_api_keys = []
+        for i in range(1, 7):  # Load JINA_API_KEY_1 through JINA_API_KEY_6
+            key = os.getenv(f"JINA_API_KEY_{i}")
+            if key:
+                self.jina_api_keys.append(key)
+        
+        # Track used keys to avoid retrying failed keys
+        self.used_jina_keys = set()
+        
+        if self.jina_api_keys:
+            print(f"✓ {len(self.jina_api_keys)} Jina API key(s) loaded for reranking")
         else:
-            print("⚠ Jina API key not found, will use fallback reranking")
+            print("⚠ No Jina API keys found, will use fallback reranking")
 
         # Create directory for BM25 indexes if it doesn't exist
         os.makedirs(self.bm25_index_dir, exist_ok=True)
@@ -281,7 +289,7 @@ class HybridRetriever:
     )
     def _rerank_with_jina(self, query: str, candidates: List[Dict[str, Any]], top_n: int) -> List[Dict[str, Any]]:
         """
-        Rerank candidates using Jina AI reranking API
+        Rerank candidates using Jina AI reranking API with automatic key rotation
 
         Args:
             query: Query text
@@ -292,10 +300,10 @@ class HybridRetriever:
             Reranked list of documents
 
         Raises:
-            Exception: If API call fails after retries
+            Exception: If API call fails with all available keys
         """
-        if not self.jina_api_key:
-            raise ValueError("Jina API key not configured")
+        if not self.jina_api_keys:
+            raise ValueError("No Jina API keys configured")
 
         if not candidates:
             return []
@@ -305,10 +313,6 @@ class HybridRetriever:
 
         # Prepare API request
         url = "https://api.jina.ai/v1/rerank"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.jina_api_key}"
-        }
         data = {
             "model": "jina-reranker-v3",
             "query": query,
@@ -317,29 +321,54 @@ class HybridRetriever:
             "return_documents": False
         }
 
-        # Make API call
-        try:
-            response = requests.post(url, headers=headers, json=data, timeout=30)
-            response.raise_for_status()
-            result = response.json()
+        # Try each available key until one succeeds
+        last_exception = None
+        for key_idx, api_key in enumerate(self.jina_api_keys, 1):
+            # Skip keys that have already been marked as used/failed
+            if api_key in self.used_jina_keys:
+                continue
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            try:
+                response = requests.post(url, headers=headers, json=data, timeout=30)
+                response.raise_for_status()
+                result = response.json()
 
-            # Process results
-            reranked_docs = []
-            for item in result.get('results', []):
-                idx = item['index']
-                score = item['relevance_score']
+                reranked_docs = []
+                for item in result.get('results', []):
+                    idx = item['index']
+                    score = item['relevance_score']
 
-                # Get original document and update score
-                doc = candidates[idx].copy()
-                doc['rerank_score'] = score
-                doc['final_score'] = score
-                reranked_docs.append(doc)
+                    # Get original document and update score
+                    doc = candidates[idx].copy()
+                    doc['rerank_score'] = score
+                    doc['final_score'] = score
+                    reranked_docs.append(doc)
 
-            return reranked_docs
+                return reranked_docs
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error calling Jina reranking API: {e}")
-            raise
+            except requests.exceptions.RequestException as e:
+                error_msg = str(e)
+                status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
+                
+                # Mark this key as used if it's a client error (403, 401, 429, etc.)
+                if status_code in [401, 403, 429]:
+                    logger.warning(f"Jina API key #{key_idx} failed with status {status_code}, marking as used")
+                    self.used_jina_keys.add(api_key)
+                    print(f"⚠ Key #{key_idx} failed ({status_code}), trying next key...")
+                else:
+                    logger.warning(f"Jina API key #{key_idx} encountered error: {error_msg}")
+                
+                last_exception = e
+                continue
+        
+        # All keys failed
+        logger.error(f"All Jina API keys exhausted. Last error: {last_exception}")
+        raise last_exception if last_exception else Exception("All Jina API keys failed")
 
     def rerank_candidates(self, query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -356,7 +385,7 @@ class HybridRetriever:
             return []
 
         # Try to use Jina reranking API if available
-        if self.jina_api_key:
+        if self.jina_api_keys:
             try:
                 print("Using Jina AI reranking...")
                 reranked = self._rerank_with_jina(query, candidates, self.config.final_top_k)
