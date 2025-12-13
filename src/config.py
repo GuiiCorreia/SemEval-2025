@@ -48,6 +48,7 @@ class RetrievalConfig:
     dense_top_k: int = 10
     final_top_k: int = 5
     max_candidates: int = 50
+    retrieval_mode: str = "hybrid"  # "hybrid", "dense_only", "bm25_only"
 
 
 @dataclass
@@ -92,7 +93,8 @@ class SystemConfig:
             bm25_top_k=int(os.getenv("BM25_TOP_K", "10")),
             dense_top_k=int(os.getenv("DENSE_TOP_K", "10")),
             final_top_k=int(os.getenv("FINAL_TOP_K", "5")),
-            max_candidates=int(os.getenv("MAX_CANDIDATES", "50"))
+            max_candidates=int(os.getenv("MAX_CANDIDATES", "50")),
+            retrieval_mode=os.getenv("RETRIEVAL_MODE", "hybrid")
         )
         self.query_diversification = QueryDiversificationConfig(
             num_variants=int(os.getenv("QUERY_VARIANTS", "5"))
@@ -167,6 +169,8 @@ def create_config_from_yaml(yaml_config: Dict[str, Any]) -> SystemConfig:
             config.retrieval.final_top_k = ret_config['final_top_k']
         if 'max_candidates' in ret_config:
             config.retrieval.max_candidates = ret_config['max_candidates']
+        if 'retrieval_mode' in ret_config:
+            config.retrieval.retrieval_mode = ret_config['retrieval_mode']
     
     if 'query_diversification' in yaml_config:
         qd_config = yaml_config['query_diversification']

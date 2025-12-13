@@ -52,20 +52,23 @@ class Pipeline:
         self,
         current_question: str,
         conversation_history: List[Dict[str, str]],
-        collection_name: str
+        collection_name: str,
+        retrieval_only: bool = False
     ) -> Dict[str, Any]:
         """
         Process a single query through the complete pipeline
-        
+
         Args:
             current_question: User's current question (q)
             conversation_history: Full conversation history (C)
             collection_name: Document collection to search
-            
+            retrieval_only: If True, only run retrieval (phases 1-4), skip generation (phases 5-6)
+
         Returns:
             Complete response with metadata (R)
         """
-        print(f"Processing query: {current_question}")
+        mode = "retrieval" if retrieval_only else "full pipeline"
+        print(f"Processing query ({mode}): {current_question}")
         
         # Phase 1: Context-Aware Query Reformulation
         print("Phase 1: Query Reformulation...")
@@ -87,12 +90,32 @@ class Pipeline:
         print("Phase 4: Reranking...")
         top_documents = self.hybrid_retriever.rerank_candidates(reformulated_query, candidates)
         print(f"Selected {len(top_documents)} top documents")
-        
+
+        # ============================================================
+        # RETRIEVAL-ONLY MODE: Skip generation phases (5-6)
+        # ============================================================
+        if retrieval_only:
+            print("Retrieval-only mode: Skipping answerability and generation phases")
+            return {
+                "pipeline_metadata": {
+                    "original_question": current_question,
+                    "reformulated_query": reformulated_query,
+                    "query_variants": query_variants,
+                    "num_candidates": len(candidates),
+                    "num_top_docs": len(top_documents),
+                    "retrieved_documents": top_documents
+                }
+            }
+
+        # ============================================================
+        # FULL PIPELINE MODE: Run answerability and generation (5-6)
+        # ============================================================
+
         # Phase 5: Answerability Classification
         print("Phase 5: Answerability Detection...")
         answerability = self.answerability_detector.classify(reformulated_query, top_documents)
         print(f"Answerability: {answerability.value}")
-        
+
         # Phase 6: Conditional Response Generation
         print("Phase 6: Response Generation...")
         response = self.response_generator.generate_response(
@@ -101,7 +124,7 @@ class Pipeline:
             top_documents,
             conversation_history
         )
-        
+
         # Add pipeline metadata
         response.update({
             "pipeline_metadata": {
@@ -114,7 +137,7 @@ class Pipeline:
                 "retrieved_documents": top_documents  # Include full document details
             }
         })
-        
+
         print("Pipeline processing complete!")
         return response
     

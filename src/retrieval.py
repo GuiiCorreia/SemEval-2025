@@ -235,50 +235,136 @@ class HybridRetriever:
             
         return results
     
+    def _reciprocal_rank_fusion(
+        self,
+        bm25_results: List[List[Dict[str, Any]]],
+        dense_results: List[List[Dict[str, Any]]],
+        k: int = 60
+    ) -> List[Dict[str, Any]]:
+        """
+        Combine BM25 and dense retrieval results using Reciprocal Rank Fusion (RRF)
+
+        Args:
+            bm25_results: List of BM25 result lists (one per query variant)
+            dense_results: List of dense result lists (one per query variant)
+            k: Constant for RRF formula (default 60)
+
+        Returns:
+            Fused and ranked list of documents
+        """
+        # Collect all results with their ranks
+        doc_scores = {}  # doc_id -> RRF score
+        doc_info = {}    # doc_id -> document data
+
+        # Process BM25 results
+        for result_list in bm25_results:
+            for rank, doc in enumerate(result_list, start=1):
+                doc_id = doc['document_id']
+                rrf_score = 1.0 / (k + rank)
+
+                if doc_id not in doc_scores:
+                    doc_scores[doc_id] = 0.0
+                    doc_info[doc_id] = doc.copy()
+                    doc_info[doc_id]['sources'] = []
+                    doc_info[doc_id]['original_scores'] = {}
+
+                doc_scores[doc_id] += rrf_score
+                doc_info[doc_id]['sources'].append('bm25')
+                doc_info[doc_id]['original_scores']['bm25'] = doc.get('score', 0.0)
+
+        # Process Dense results
+        for result_list in dense_results:
+            for rank, doc in enumerate(result_list, start=1):
+                doc_id = doc['document_id']
+                rrf_score = 1.0 / (k + rank)
+
+                if doc_id not in doc_scores:
+                    doc_scores[doc_id] = 0.0
+                    doc_info[doc_id] = doc.copy()
+                    doc_info[doc_id]['sources'] = []
+                    doc_info[doc_id]['original_scores'] = {}
+
+                doc_scores[doc_id] += rrf_score
+                doc_info[doc_id]['sources'].append('dense')
+                doc_info[doc_id]['original_scores']['dense'] = doc.get('score', 0.0)
+
+        # Create final ranked list
+        fused_results = []
+        for doc_id, rrf_score in doc_scores.items():
+            doc = doc_info[doc_id]
+            doc['rrf_score'] = rrf_score
+            doc['final_score'] = rrf_score
+            # Consolidate source information
+            doc['source'] = '+'.join(sorted(set(doc['sources'])))
+            fused_results.append(doc)
+
+        # Sort by RRF score (descending)
+        fused_results.sort(key=lambda x: x['rrf_score'], reverse=True)
+
+        return fused_results
+
     def hybrid_retrieve(self, collection_name: str, queries: List[str]) -> List[Dict[str, Any]]:
         """
-        Perform hybrid retrieval for multiple query variants
-        
+        Perform hybrid retrieval for multiple query variants using RRF fusion
+
         Args:
             collection_name: Collection to search
             queries: List of query variants
-            
+
         Returns:
-            List of unique retrieved documents
+            Fused and ranked list of documents
         """
-        all_candidates = []
-        
+        # Check retrieval mode
+        mode = self.config.retrieval_mode
+        print(f"Using retrieval mode: {mode}")
+
+        bm25_results_all = []
+        dense_results_all = []
+
         for query in queries:
-            # BM25 retrieval
-            bm25_results = self.retrieve_bm25(
-                collection_name, query, self.config.bm25_top_k
-            )
-            all_candidates.extend(bm25_results)
-            
-            # Dense retrieval
-            dense_results = self.retrieve_dense(
-                collection_name, query, self.config.dense_top_k
-            )
-            all_candidates.extend(dense_results)
-        
-        # Deduplicate by document_id
-        seen_ids = set()
-        unique_candidates = []
-        
-        for doc in all_candidates:
-            doc_id = doc['document_id']
-            if doc_id not in seen_ids:
-                seen_ids.add(doc_id)
-                unique_candidates.append(doc)
-        
-        print(f"Retrieved {len(unique_candidates)} unique candidates from {len(all_candidates)} total results")
-        
+            # BM25 retrieval (if enabled)
+            if mode in ["hybrid", "bm25_only"]:
+                bm25_results = self.retrieve_bm25(
+                    collection_name, query, self.config.bm25_top_k
+                )
+                bm25_results_all.append(bm25_results)
+
+            # Dense retrieval (if enabled)
+            if mode in ["hybrid", "dense_only"]:
+                dense_results = self.retrieve_dense(
+                    collection_name, query, self.config.dense_top_k
+                )
+                dense_results_all.append(dense_results)
+
+        # Apply RRF fusion if in hybrid mode
+        if mode == "hybrid":
+            print(f"Applying Reciprocal Rank Fusion (RRF)...")
+            fused_results = self._reciprocal_rank_fusion(bm25_results_all, dense_results_all)
+            print(f"RRF fusion complete: {len(fused_results)} unique documents")
+        else:
+            # For single-mode retrieval, just concatenate and deduplicate
+            all_results = bm25_results_all + dense_results_all
+            seen_ids = set()
+            fused_results = []
+
+            for result_list in all_results:
+                for doc in result_list:
+                    doc_id = doc['document_id']
+                    if doc_id not in seen_ids:
+                        seen_ids.add(doc_id)
+                        doc['final_score'] = doc.get('score', 0.0)
+                        fused_results.append(doc)
+
+            # Sort by original score
+            fused_results.sort(key=lambda x: x['final_score'], reverse=True)
+            print(f"Retrieved {len(fused_results)} unique documents")
+
         # Limit to max candidates
-        if len(unique_candidates) > self.config.max_candidates:
-            unique_candidates = unique_candidates[:self.config.max_candidates]
+        if len(fused_results) > self.config.max_candidates:
+            fused_results = fused_results[:self.config.max_candidates]
             print(f"Limited to {self.config.max_candidates} candidates")
-        
-        return unique_candidates
+
+        return fused_results
 
     @retry(
         retry=retry_if_exception(is_api_error),

@@ -32,25 +32,25 @@ def load_queries(queries_file: str) -> List[Dict[str, Any]]:
 
 
 def run_retrieval_experiment(
-    pipeline, 
-    queries: List[Dict[str, Any]], 
+    pipeline,
+    queries: List[Dict[str, Any]],
     collection_name: str,
     output_file: str
 ):
     """Run retrieval experiment and save results"""
     print(f"Running retrieval experiment on {len(queries)} queries...")
-    
+
     results = []
     for i, query_item in enumerate(queries):
         if i % 10 == 0:
             print(f"Processing query {i+1}/{len(queries)}...")
-        
+
         try:
             # Extract conversation history from query item
             conversation_history = []
             if 'input' in query_item:
                 conversation_history = query_item['input']
-            
+
             # Get current question
             current_question = query_item.get('text', '')
             if not current_question and conversation_history:
@@ -59,16 +59,17 @@ def run_retrieval_experiment(
                     if msg.get('speaker') == 'user':
                         current_question = msg.get('text', '')
                         break
-            
+
             if not current_question:
                 print(f"Warning: No question found for query {i}")
                 continue
-            
-            # Process through pipeline
+
+            # Process through pipeline (retrieval-only mode)
             response = pipeline.process_query(
                 current_question=current_question,
                 conversation_history=conversation_history,
-                collection_name=collection_name
+                collection_name=collection_name,
+                retrieval_only=True
             )
             
             # Format for retrieval evaluation (compatible with evaluation template)
@@ -91,8 +92,33 @@ def run_retrieval_experiment(
                 'Collection': collection_name,
                 'contexts': retrieved_docs,
                 'input': conversation_history,
-                'targets': query_item.get('targets', [{'speaker': 'agent', 'text': ''}])
+                'targets': query_item.get('targets', [{'speaker': 'agent', 'text': ''}]),
+                'metadata': {
+                    'reference_contexts': query_item.get('contexts', []),
+                    'pipeline_metadata': response.get('pipeline_metadata', {})
+                }
             }
+
+            # Propagate original metadata from input
+            if 'conversation_id' in query_item:
+                result['conversation_id'] = query_item['conversation_id']
+            if 'task_id' in query_item:
+                result['task_id'] = query_item['task_id']
+            if 'task_type' in query_item:
+                result['task_type'] = query_item['task_type']
+            if 'turn' in query_item:
+                result['turn'] = query_item['turn']
+            if 'Question Type' in query_item:
+                result['Question Type'] = query_item['Question Type']
+            if 'No. References' in query_item:
+                result['No. References'] = query_item['No. References']
+            if 'Multi-Turn' in query_item:
+                result['Multi-Turn'] = query_item['Multi-Turn']
+            if 'Answerability' in query_item:
+                result['Answerability'] = query_item['Answerability']
+            if 'dataset' in query_item:
+                result['dataset'] = query_item['dataset']
+
             results.append(result)
             
         except Exception as e:
@@ -256,7 +282,14 @@ def main():
         type=str,
         help='Path to corpus file to index before running experiments'
     )
-    
+    parser.add_argument(
+        '--retrieval-mode',
+        type=str,
+        choices=['hybrid', 'dense_only', 'bm25_only'],
+        default=None,
+        help='Retrieval mode: hybrid (both), dense_only, or bm25_only. If not specified, uses config/env default (hybrid)'
+    )
+
     args = parser.parse_args()
     
     print("Initializing Multi-Turn RAG Pipeline...")
@@ -264,7 +297,12 @@ def main():
     try:
         # Create pipeline
         pipeline = create_pipeline()
-        
+
+        # Override retrieval mode if specified via argument
+        if args.retrieval_mode:
+            print(f"Overriding retrieval mode to: {args.retrieval_mode}")
+            pipeline.hybrid_retriever.config.retrieval_mode = args.retrieval_mode
+
         # Index corpus if provided
         if args.index_corpus:
             print(f"Indexing corpus {args.index_corpus}...")
