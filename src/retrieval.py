@@ -338,7 +338,7 @@ class HybridRetriever:
 
         # Apply RRF fusion if in hybrid mode
         if mode == "hybrid":
-            print(f"Applying Reciprocal Rank Fusion (RRF)...")
+            print(f"Applying Reciprocal Rank Fusion (RRF)...BM25 retrieved: {len(bm25_results_all)}, Dense retrieved: {len(dense_results_all)}")
             fused_results = self._reciprocal_rank_fusion(bm25_results_all, dense_results_all)
             print(f"RRF fusion complete: {len(fused_results)} unique documents")
         else:

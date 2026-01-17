@@ -44,9 +44,9 @@ class QdrantConfig:
 @dataclass
 class RetrievalConfig:
     """Configuration for retrieval parameters"""
-    bm25_top_k: int = 10
-    dense_top_k: int = 10
-    final_top_k: int = 5
+    bm25_top_k: int = 5
+    dense_top_k: int = 5
+    final_top_k: int = 10
     max_candidates: int = 50
     retrieval_mode: str = "hybrid"  # "hybrid", "dense_only", "bm25_only"
 
@@ -90,9 +90,9 @@ class SystemConfig:
             api_key=os.getenv("QDRANT_API_KEY")
         )
         self.retrieval = RetrievalConfig(
-            bm25_top_k=int(os.getenv("BM25_TOP_K", "10")),
-            dense_top_k=int(os.getenv("DENSE_TOP_K", "10")),
-            final_top_k=int(os.getenv("FINAL_TOP_K", "5")),
+            bm25_top_k=int(os.getenv("BM25_TOP_K", "5")),
+            dense_top_k=int(os.getenv("DENSE_TOP_K", "5")),
+            final_top_k=int(os.getenv("FINAL_TOP_K", "10")),
             max_candidates=int(os.getenv("MAX_CANDIDATES", "50")),
             retrieval_mode=os.getenv("RETRIEVAL_MODE", "hybrid")
         )

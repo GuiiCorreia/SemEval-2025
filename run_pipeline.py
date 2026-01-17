@@ -4,10 +4,15 @@ Main Script for Running the Multi-Turn RAG Pipeline
 
 This script provides a complete interface for running retrieval and generation
 experiments using the pipeline.
+
+Supports two modes:
+- Original pipeline (default)
+- DSPy multi-hop RAG (--dspy-multihop)
 """
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import List, Dict, Any
@@ -17,6 +22,11 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src import create_pipeline
+from src.config import load_config
+from src.embeddings import EmbeddingService
+from src.vector_store import VectorStore
+from src.retrieval import HybridRetriever
+from src.dspy_multihop import create_multihop_retriever
 
 # Load environment variables
 load_dotenv()
@@ -31,13 +41,19 @@ def load_queries(queries_file: str) -> List[Dict[str, Any]]:
     return queries
 
 
+
+
 def run_retrieval_experiment(
     pipeline,
     queries: List[Dict[str, Any]],
-    collection_name: str,
+    default_collection: str,
     output_file: str
 ):
-    """Run retrieval experiment and save results"""
+    """Run retrieval experiment and save results.
+
+    Each query can have its own collection via the 'Collection' field.
+    Falls back to default_collection if not specified.
+    """
     print(f"Running retrieval experiment on {len(queries)} queries...")
 
     results = []
@@ -46,6 +62,9 @@ def run_retrieval_experiment(
             print(f"Processing query {i+1}/{len(queries)}...")
 
         try:
+            # Get collection for this query (use query's collection or fall back to default)
+            collection_name = query_item.get('Collection', default_collection)
+
             # Extract conversation history from query item
             conversation_history = []
             if 'input' in query_item:
@@ -71,12 +90,12 @@ def run_retrieval_experiment(
                 collection_name=collection_name,
                 retrieval_only=True
             )
-            
+
             # Format for retrieval evaluation (compatible with evaluation template)
             retrieved_docs = []
             # Get detailed retrieval results from pipeline metadata
             retrieval_results = response.get('pipeline_metadata', {}).get('retrieved_documents', [])
-            
+
             # Use detailed retrieval results (should always be available)
             for doc in retrieval_results:
                 retrieved_docs.append({
@@ -86,7 +105,7 @@ def run_retrieval_experiment(
                     'text': doc.get('text', ''),
                     'title': doc.get('title', '')
                 })
-            
+
             result = {
                 'task_id': query_item.get('_id', f"query_{i}"),
                 'Collection': collection_name,
@@ -120,40 +139,47 @@ def run_retrieval_experiment(
                 result['dataset'] = query_item['dataset']
 
             results.append(result)
-            
+
         except Exception as e:
             print(f"Error processing query {i}: {e}")
             continue
-    
+
     # Save results
     print(f"Saving {len(results)} results to {output_file}...")
     with open(output_file, 'w', encoding='utf-8') as f:
         for result in results:
             f.write(json.dumps(result) + '\n')
-    
+
     print(f"✓ Retrieval experiment complete! Results saved to {output_file}")
 
 
 def run_generation_experiment(
     pipeline,
     queries: List[Dict[str, Any]],
-    collection_name: str,
+    default_collection: str,
     output_file: str
 ):
-    """Run generation experiment and save results"""
+    """Run generation experiment and save results.
+
+    Each query can have its own collection via the 'Collection' field.
+    Falls back to default_collection if not specified.
+    """
     print(f"Running generation experiment on {len(queries)} queries...")
-    
+
     results = []
     for i, query_item in enumerate(queries):
         if i % 10 == 0:
             print(f"Processing query {i+1}/{len(queries)}...")
-        
+
         try:
+            # Get collection for this query (use query's collection or fall back to default)
+            collection_name = query_item.get('Collection', default_collection)
+
             # Extract conversation history
             conversation_history = []
             if 'input' in query_item:
                 conversation_history = query_item['input']
-            
+
             # Get current question
             current_question = query_item.get('text', '')
             if not current_question and conversation_history:
@@ -161,23 +187,23 @@ def run_generation_experiment(
                     if msg.get('speaker') == 'user':
                         current_question = msg.get('text', '')
                         break
-            
+
             if not current_question:
                 print(f"Warning: No question found for query {i}")
                 continue
-            
+
             # Process through pipeline
             response = pipeline.process_query(
                 current_question=current_question,
                 conversation_history=conversation_history,
                 collection_name=collection_name
             )
-            
+
             # Format for generation evaluation (compatible with evaluation template)
             retrieved_docs = []
             # Get detailed retrieval results from pipeline metadata
             retrieval_results = response.get('pipeline_metadata', {}).get('retrieved_documents', [])
-            
+
             # Use detailed retrieval results (should always be available)
             for doc in retrieval_results:
                 retrieved_docs.append({
@@ -187,7 +213,7 @@ def run_generation_experiment(
                     'text': doc.get('text', ''),
                     'title': doc.get('title', '')
                 })
-            
+
             result = {
                 'Collection': collection_name,
                 'input': conversation_history,
@@ -206,7 +232,7 @@ def run_generation_experiment(
                     'pipeline_metadata': response.get('pipeline_metadata', {})
                 }
             }
-            
+
             # Propagate original metadata from input
             if 'conversation_id' in query_item:
                 result['conversation_id'] = query_item['conversation_id']
@@ -227,17 +253,17 @@ def run_generation_experiment(
             if 'dataset' in query_item:
                 result['dataset'] = query_item['dataset']
             results.append(result)
-            
+
         except Exception as e:
             print(f"Error processing query {i}: {e}")
             continue
-    
+
     # Save results
     print(f"Saving {len(results)} results to {output_file}...")
     with open(output_file, 'w', encoding='utf-8') as f:
         for result in results:
             f.write(json.dumps(result) + '\n')
-    
+
     print(f"✓ Generation experiment complete! Results saved to {output_file}")
 
 
@@ -262,8 +288,8 @@ def main():
     parser.add_argument(
         '--collection',
         type=str,
-        required=True,
-        help='Collection name to search'
+        default=None,
+        help='Collection name to search (auto-detected from queries if not provided)'
     )
     parser.add_argument(
         '--output-retrieval',
@@ -289,11 +315,106 @@ def main():
         default=None,
         help='Retrieval mode: hybrid (both), dense_only, or bm25_only. If not specified, uses config/env default (hybrid)'
     )
+    parser.add_argument(
+        '--dspy-multihop',
+        action='store_true',
+        help='Use DSPy multi-hop RAG instead of the original pipeline'
+    )
+    parser.add_argument(
+        '--num-hops',
+        type=int,
+        default=3,
+        help='Number of retrieval hops for DSPy multi-hop mode'
+    )
+    parser.add_argument(
+        '--dspy-model',
+        type=str,
+        default='gemini/gemini-3-flash-preview',
+        help='LLM model to use for DSPy multi-hop (e.g., gemini/gemini-2.5-flash-preview, groq/llama-3.3-70b-versatile)'
+    )
 
     args = parser.parse_args()
-    
+
+    # Load queries first
+    print(f"Loading queries from {args.queries}...")
+    queries = load_queries(args.queries)
+    print(f"Loaded {len(queries)} queries")
+
+    # Check if DSPy multi-hop mode is enabled
+    if args.dspy_multihop:
+        print("Initializing DSPy Multi-Hop RAG Pipeline...")
+        print(f"  Model: {args.dspy_model}")
+        print(f"  Hops: {args.num_hops}")
+
+        try:
+            # Configure DSPy
+            import dspy
+
+            # Get API key based on model provider
+            if args.dspy_model.startswith('gemini/'):
+                api_key = os.getenv('GEMINI_API_KEY')
+                if not api_key:
+                    raise ValueError("GEMINI_API_KEY not found in environment")
+            elif args.dspy_model.startswith('groq/'):
+                api_key = os.getenv('GROQ_API_KEY')
+                if not api_key:
+                    raise ValueError("GROQ_API_KEY not found in environment")
+            else:
+                api_key = os.getenv('OPENAI_API_KEY')
+
+            lm = dspy.LM(args.dspy_model, api_key=api_key, temperature=0.4, max_tokens=8000)
+            dspy.configure(lm=lm)
+
+            # Initialize retrieval infrastructure
+            config = load_config()
+            embedding_service = EmbeddingService(config.embedding)
+            vector_store = VectorStore(config.qdrant, embedding_service)
+            hybrid_retriever = HybridRetriever(config.retrieval, vector_store)
+
+            # Override retrieval mode if specified
+            if args.retrieval_mode:
+                print(f"Overriding retrieval mode to: {args.retrieval_mode}")
+                hybrid_retriever.config.retrieval_mode = args.retrieval_mode
+
+            # Index corpus if provided
+            if args.index_corpus:
+                print(f"Indexing corpus {args.index_corpus}...")
+                collection_for_index = args.collection or "default"
+                bm25_success = hybrid_retriever.index_corpus_bm25(collection_for_index, args.index_corpus)
+                if not bm25_success:
+                    print("Failed to index corpus for BM25!")
+                    return 1
+
+            # Create DSPy multi-hop retriever (collection will be taken from each query)
+            pipeline = create_multihop_retriever(
+                hybrid_retriever=hybrid_retriever,
+                collection_name=args.collection,  # Default, can be overridden per-query
+                num_hops=args.num_hops
+            )
+
+            print("DSPy Multi-Hop RAG Pipeline initialized!")
+
+            # Run experiments (only retrieval mode supported for DSPy multi-hop)
+            if args.mode in ['retrieval', 'both']:
+                run_retrieval_experiment(
+                    pipeline, queries, args.collection, args.output_retrieval
+                )
+
+            if args.mode in ['generation', 'both']:
+                print("Warning: Generation mode not yet supported with DSPy multi-hop. Skipping.")
+
+            print("\n✓ All experiments completed successfully!")
+            return 0
+
+        except Exception as e:
+            print(f"\n✗ Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
+
+    # Original pipeline mode
     print("Initializing Multi-Turn RAG Pipeline...")
-    
+
     try:
         # Create pipeline
         pipeline = create_pipeline()
@@ -305,31 +426,27 @@ def main():
 
         # Index corpus if provided
         if args.index_corpus:
+            collection_for_index = args.collection or "default"
             print(f"Indexing corpus {args.index_corpus}...")
-            success = pipeline.setup_collection(args.collection, args.index_corpus)
+            success = pipeline.setup_collection(collection_for_index, args.index_corpus)
             if not success:
                 print("Failed to index corpus!")
                 return 1
-        
-        # Load queries
-        print(f"Loading queries from {args.queries}...")
-        queries = load_queries(args.queries)
-        print(f"Loaded {len(queries)} queries")
-        
-        # Run experiments
+
+        # Run experiments (queries already loaded above)
         if args.mode in ['retrieval', 'both']:
             run_retrieval_experiment(
                 pipeline, queries, args.collection, args.output_retrieval
             )
-        
+
         if args.mode in ['generation', 'both']:
             run_generation_experiment(
                 pipeline, queries, args.collection, args.output_generation
             )
-        
+
         print("\n✓ All experiments completed successfully!")
         return 0
-        
+
     except Exception as e:
         print(f"\n✗ Error: {e}")
         return 1
