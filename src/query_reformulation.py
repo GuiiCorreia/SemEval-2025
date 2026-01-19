@@ -72,7 +72,7 @@ class QueryReformulator:
         """
         # Format conversation history
         history_text = ""
-        for msg in conversation_history[-10:]:  # Limit to last 10 messages for context
+        for msg in conversation_history:
             speaker = msg.get('speaker', 'unknown')
             text = msg.get('text', '')
             history_text += f"{speaker}: {text}\n"

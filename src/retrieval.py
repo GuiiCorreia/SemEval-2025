@@ -7,8 +7,10 @@ This module implements hybrid retrieval combining BM25 and dense vector search.
 import json
 import pickle
 import os
+import time
 import logging
 import requests
+import threading
 from typing import List, Dict, Any, Optional
 from rank_bm25 import BM25Okapi
 from dotenv import load_dotenv
@@ -71,10 +73,20 @@ class HybridRetriever:
             key = os.getenv(f"JINA_API_KEY_{i}")
             if key:
                 self.jina_api_keys.append(key)
-        
-        # Track used keys to avoid retrying failed keys
-        self.used_jina_keys = set()
-        
+
+        # Thread-safe key management
+        self._jina_lock = threading.Lock()
+
+        # Permanently exhausted keys (401, 403 - invalid or quota exceeded)
+        self.exhausted_jina_keys = set()
+
+        # Temporarily rate-limited keys (429 - too many requests)
+        # Maps key -> timestamp when rate limited
+        self.rate_limited_jina_keys = {}
+
+        # Rate limit cooldown in seconds (wait before retrying a rate-limited key)
+        self.rate_limit_cooldown = 60
+
         if self.jina_api_keys:
             print(f"✓ {len(self.jina_api_keys)} Jina API key(s) loaded for reranking")
         else:
@@ -338,7 +350,9 @@ class HybridRetriever:
 
         # Apply RRF fusion if in hybrid mode
         if mode == "hybrid":
-            print(f"Applying Reciprocal Rank Fusion (RRF)...BM25 retrieved: {len(bm25_results_all)}, Dense retrieved: {len(dense_results_all)}")
+            bm25_doc_count = sum(len(r) for r in bm25_results_all)
+            dense_doc_count = sum(len(r) for r in dense_results_all)
+            print(f"Applying RRF: BM25={bm25_doc_count} docs, Dense={dense_doc_count} docs")
             fused_results = self._reciprocal_rank_fusion(bm25_results_all, dense_results_all)
             print(f"RRF fusion complete: {len(fused_results)} unique documents")
         else:
@@ -409,16 +423,35 @@ class HybridRetriever:
 
         # Try each available key until one succeeds
         last_exception = None
+        current_time = time.time()
+
+        # Get available keys (thread-safe)
+        with self._jina_lock:
+            # Reset rate-limited keys that have cooled down
+            cooled_keys = [
+                key for key, limited_time in self.rate_limited_jina_keys.items()
+                if current_time - limited_time >= self.rate_limit_cooldown
+            ]
+            for key in cooled_keys:
+                del self.rate_limited_jina_keys[key]
+                logger.info(f"Jina API key cooled down, available again")
+
         for key_idx, api_key in enumerate(self.jina_api_keys, 1):
-            # Skip keys that have already been marked as used/failed
-            if api_key in self.used_jina_keys:
-                continue
-            
+            # Thread-safe check for key availability
+            with self._jina_lock:
+                # Skip permanently exhausted keys (401, 403)
+                if api_key in self.exhausted_jina_keys:
+                    continue
+
+                # Skip temporarily rate-limited keys (429)
+                if api_key in self.rate_limited_jina_keys:
+                    continue
+
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}"
             }
-            
+
             try:
                 response = requests.post(url, headers=headers, json=data, timeout=30)
                 response.raise_for_status()
@@ -440,19 +473,45 @@ class HybridRetriever:
             except requests.exceptions.RequestException as e:
                 error_msg = str(e)
                 status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
-                
-                # Mark this key as used if it's a client error (403, 401, 429, etc.)
-                if status_code in [401, 403, 429]:
-                    logger.warning(f"Jina API key #{key_idx} failed with status {status_code}, marking as used")
-                    self.used_jina_keys.add(api_key)
-                    print(f"⚠ Key #{key_idx} failed ({status_code}), trying next key...")
-                else:
-                    logger.warning(f"Jina API key #{key_idx} encountered error: {error_msg}")
-                
+
+                with self._jina_lock:
+                    if status_code == 429:
+                        # Rate limited - temporarily skip this key
+                        self.rate_limited_jina_keys[api_key] = time.time()
+                        logger.warning(f"Jina API key #{key_idx} rate limited (429), will retry after cooldown")
+                        print(f"⚠ Key #{key_idx} rate limited (429), trying next key...")
+                    elif status_code in [401, 403]:
+                        # Permanently exhausted - invalid or quota exceeded
+                        self.exhausted_jina_keys.add(api_key)
+                        logger.warning(f"Jina API key #{key_idx} exhausted ({status_code}), permanently disabled")
+                        print(f"⚠ Key #{key_idx} exhausted ({status_code}), trying next key...")
+                    else:
+                        logger.warning(f"Jina API key #{key_idx} encountered error: {error_msg}")
+
                 last_exception = e
                 continue
-        
-        # All keys failed
+
+        # Check if all keys are just rate-limited (not exhausted)
+        with self._jina_lock:
+            all_exhausted = len(self.exhausted_jina_keys) >= len(self.jina_api_keys)
+            all_rate_limited = (
+                len(self.rate_limited_jina_keys) + len(self.exhausted_jina_keys) >= len(self.jina_api_keys)
+            )
+
+        if all_rate_limited and not all_exhausted:
+            # All keys are rate-limited but not permanently exhausted - wait and retry
+            logger.warning("All Jina API keys rate-limited, waiting for cooldown...")
+            print(f"⏳ All keys rate-limited, waiting {self.rate_limit_cooldown}s...")
+            time.sleep(self.rate_limit_cooldown)
+
+            # Reset rate-limited keys and retry
+            with self._jina_lock:
+                self.rate_limited_jina_keys.clear()
+
+            # Recursive retry (only once)
+            return self._rerank_with_jina(query, candidates, top_n)
+
+        # All keys permanently failed
         logger.error(f"All Jina API keys exhausted. Last error: {last_exception}")
         raise last_exception if last_exception else Exception("All Jina API keys failed")
 

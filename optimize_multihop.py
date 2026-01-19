@@ -4,17 +4,18 @@ Multi-Hop RAG Optimization Script
 This script uses DSPy GEPA optimizer to improve the multi-hop query generation
 and notes building modules using an LLM judge for feedback.
 
+Requires pre-built datasets from build_optimization_dataset.py.
+
 Usage:
-    python optimize_multihop.py --collection <collection_name> --samples 100
+    python optimize_multihop.py --train-file optimization_data/train.jsonl --val-file optimization_data/val.jsonl
 """
 
 import os
 import json
-import random
 import argparse
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
+from dataclasses import dataclass, field
 from collections import defaultdict
-from dataclasses import dataclass
 
 import dspy
 from dspy import GEPA
@@ -24,7 +25,7 @@ from src.config import load_config
 from src.embeddings import EmbeddingService
 from src.vector_store import VectorStore
 from src.retrieval import HybridRetriever
-from src.dspy_multihop import MultiHopRetriever, create_multihop_retriever
+from src.dspy_multihop import create_multihop_retriever
 
 # Load environment variables
 load_dotenv()
@@ -34,7 +35,6 @@ load_dotenv()
 # =============================================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in environment variables")
@@ -44,36 +44,27 @@ if not GEMINI_API_KEY:
 # MODEL CONFIGURATION
 # =============================================================================
 
-# Models - easy to change here
-# For Gemini: "gemini/gemini-2.5-flash-preview", "gemini/gemini-2.5-pro-preview"
-# For Groq: "groq/llama-3.1-8b-instant", "groq/llama-3.3-70b-versatile"
 STUDENT_MODEL = "gemini/gemini-3-flash-preview"
 TEACHER_MODEL = "gemini/gemini-3-flash-preview"
 JUDGE_MODEL = "gemini/gemini-3-flash-preview"
 
-# API key to use (change if using Groq models)
-API_KEY = GEMINI_API_KEY  # or GROQ_API_KEY
-
-# Temperature settings
 STUDENT_TEMPERATURE = 0.4
 TEACHER_TEMPERATURE = 0.4
 JUDGE_TEMPERATURE = 0.2
 
-# Max tokens
 MAX_TOKENS = 8000
 
-
 # Create LM instances (cache disabled for optimization)
-lm_student = dspy.LM(STUDENT_MODEL, temperature=STUDENT_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=API_KEY, cache=False)
-lm_teacher = dspy.LM(TEACHER_MODEL, temperature=TEACHER_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=API_KEY, cache=False)
-lm_judge = dspy.LM(JUDGE_MODEL, temperature=JUDGE_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=API_KEY, cache=False)
+lm_student = dspy.LM(STUDENT_MODEL, temperature=STUDENT_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=GEMINI_API_KEY, cache=False)
+lm_teacher = dspy.LM(TEACHER_MODEL, temperature=TEACHER_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=GEMINI_API_KEY, cache=False)
+lm_judge = dspy.LM(JUDGE_MODEL, temperature=JUDGE_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=GEMINI_API_KEY, cache=False)
 
 # Configure default LM (student)
 dspy.configure(lm=lm_student)
 
 
 # =============================================================================
-# DATA LOADING AND STRATIFIED SAMPLING
+# DATA LOADING
 # =============================================================================
 
 @dataclass
@@ -87,89 +78,33 @@ class TrainingSample:
     reference_docs: List[Dict[str, Any]]
 
 
-def load_reference_data(filepath: str) -> List[Dict[str, Any]]:
-    """Load reference data from JSONL file."""
-    data = []
+def load_dataset(filepath: str) -> List[TrainingSample]:
+    """Load pre-built dataset from JSONL file."""
+    samples = []
     with open(filepath, 'r', encoding='utf-8') as f:
         for line in f:
             entry = json.loads(line)
-            # Only include entries that have reference contexts
-            if entry.get('contexts'):
-                data.append(entry)
-    return data
-
-
-def stratified_sample(
-    data: List[Dict[str, Any]],
-    n_samples: int = 100,
-    stratify_field: str = 'Collection',
-    seed: int = 42
-) -> List[TrainingSample]:
-    """
-    Create stratified sample balanced by collection.
-
-    Args:
-        data: Full dataset
-        n_samples: Total number of samples to select
-        stratify_field: Field to stratify by
-        seed: Random seed for reproducibility
-
-    Returns:
-        List of TrainingSample objects
-    """
-    random.seed(seed)
-
-    # Group by stratification field
-    groups = defaultdict(list)
-    for entry in data:
-        key = entry.get(stratify_field, 'unknown')
-        groups[key].append(entry)
-
-    # Calculate samples per group
-    n_groups = len(groups)
-    base_per_group = n_samples // n_groups
-    remainder = n_samples % n_groups
-
-    print(f"Stratified sampling: {n_samples} samples across {n_groups} groups")
-    for group_name, group_data in groups.items():
-        print(f"  {group_name}: {len(group_data)} available")
-
-    # Sample from each group
-    samples = []
-    group_names = sorted(groups.keys())
-
-    for i, group_name in enumerate(group_names):
-        group_data = groups[group_name]
-        # Distribute remainder to first groups
-        n_for_group = base_per_group + (1 if i < remainder else 0)
-        n_for_group = min(n_for_group, len(group_data))
-
-        selected = random.sample(group_data, n_for_group)
-
-        for entry in selected:
-            # Extract question from last user input
-            inputs = entry.get('input', [])
-            question = inputs[-1].get('text', '') if inputs else ''
-
-            # Build conversation history (all but last message)
-            conversation_history = inputs[:-1] if len(inputs) > 1 else []
-
-            # Extract reference document IDs
-            contexts = entry.get('contexts', [])
-            ref_doc_ids = [ctx.get('document_id') for ctx in contexts if ctx.get('document_id')]
-
             sample = TrainingSample(
                 task_id=entry.get('task_id', ''),
-                collection=entry.get('Collection', ''),
-                question=question,
-                conversation_history=conversation_history,
-                reference_doc_ids=ref_doc_ids,
-                reference_docs=contexts
+                collection=entry.get('collection', ''),
+                question=entry.get('question', ''),
+                conversation_history=entry.get('conversation_history', []),
+                reference_doc_ids=entry.get('reference_doc_ids', []),
+                reference_docs=entry.get('documents', [])
             )
             samples.append(sample)
-
-    print(f"Total samples selected: {len(samples)}")
     return samples
+
+
+def print_dataset_distribution(samples: List[TrainingSample], label: str):
+    """Print distribution summary for a dataset."""
+    print(f"\n{label}: {len(samples)} samples")
+
+    # By Collection
+    coll_dist = defaultdict(int)
+    for s in samples:
+        coll_dist[s.collection] += 1
+    print(f"  By Collection: {dict(sorted(coll_dist.items()))}")
 
 
 # =============================================================================
@@ -201,17 +136,6 @@ class LLMJudge(dspy.Module):
         reference_docs: List[Dict[str, Any]],
         retrieved_docs: List[Dict[str, Any]]
     ) -> dspy.Prediction:
-        """
-        Judge retrieval quality.
-
-        Args:
-            question: The user's question
-            reference_docs: Ground truth documents
-            retrieved_docs: System-retrieved documents
-
-        Returns:
-            Prediction with verdict and feedback
-        """
         # Format reference documents
         ref_str = self._format_docs(reference_docs, "Reference")
 
@@ -250,63 +174,14 @@ class LLMJudge(dspy.Module):
         return "\n\n".join(formatted)
 
 
-def compute_doc_overlap(
-    retrieved_doc_ids: List[str],
-    reference_doc_ids: List[str]
-) -> Dict[str, float]:
-    """
-    Compute document overlap metrics.
-
-    Args:
-        retrieved_doc_ids: IDs of retrieved documents
-        reference_doc_ids: IDs of reference documents
-
-    Returns:
-        Dictionary with recall, precision, and overlap count
-    """
-    retrieved_set = set(retrieved_doc_ids)
-    reference_set = set(reference_doc_ids)
-
-    overlap = retrieved_set & reference_set
-    overlap_count = len(overlap)
-
-    recall = overlap_count / len(reference_set) if reference_set else 0.0
-    precision = overlap_count / len(retrieved_set) if retrieved_set else 0.0
-
-    return {
-        'overlap_count': overlap_count,
-        'recall': recall,
-        'precision': precision,
-        'retrieved_count': len(retrieved_set),
-        'reference_count': len(reference_set)
-    }
-
-
 # =============================================================================
 # METRIC WITH FEEDBACK FOR GEPA
 # =============================================================================
 
 def create_metric_with_feedback(judge: LLMJudge):
-    """
-    Create a metric function with feedback for GEPA optimization.
+    """Create a metric function with feedback for GEPA optimization."""
 
-    Args:
-        judge: LLMJudge instance
-
-    Returns:
-        Metric function compatible with GEPA
-    """
-    def metric_with_feedback(example, prediction, trace=None):
-        """
-        Evaluate retrieval using LLM judge and recall.
-
-        Args:
-            example: Training example with reference docs
-            prediction: Model prediction with retrieved docs
-
-        Returns:
-            dspy.Prediction with score and feedback
-        """
+    def metric_with_feedback(example, prediction, trace=None, pred_name=None, pred_trace=None):
         # Extract retrieved documents
         retrieved_docs = prediction.final_documents if hasattr(prediction, 'final_documents') else []
         retrieved_ids = {doc.get('document_id') for doc in retrieved_docs if doc.get('document_id')}
@@ -320,7 +195,7 @@ def create_metric_with_feedback(judge: LLMJudge):
         overlap = retrieved_ids & reference_ids
         recall = len(overlap) / len(reference_ids) if reference_ids else 0.0
 
-        # Use LLM judge for evaluation (with judge LM - lower temperature)
+        # Use LLM judge for evaluation
         with dspy.context(lm=lm_judge):
             judge_result = judge(
                 question=question,
@@ -344,22 +219,14 @@ def create_metric_with_feedback(judge: LLMJudge):
 # =============================================================================
 
 def run_optimization(
-    samples: List[TrainingSample],
+    train_samples: List[TrainingSample],
+    val_samples: List[TrainingSample],
     hybrid_retriever: HybridRetriever,
     collection_name: str,
     output_path: str = "optimized_multihop.json",
     num_threads: int = 4
 ):
-    """
-    Run GEPA optimization on the multi-hop retriever.
-
-    Args:
-        samples: Training samples
-        hybrid_retriever: HybridRetriever instance
-        collection_name: Collection to search
-        output_path: Path to save optimized model
-        num_threads: Number of parallel threads
-    """
+    """Run GEPA optimization on the multi-hop retriever."""
     print("\n" + "="*60)
     print("STARTING GEPA OPTIMIZATION")
     print("="*60)
@@ -376,8 +243,8 @@ def run_optimization(
     metric = create_metric_with_feedback(judge)
 
     # Convert samples to dspy.Example format
-    trainset = []
-    for sample in samples:
+    train_set = []
+    for sample in train_samples:
         ex = dspy.Example(
             question=sample.question,
             conversation_history=sample.conversation_history,
@@ -385,31 +252,39 @@ def run_optimization(
             reference_docs=sample.reference_docs,
             task_id=sample.task_id
         ).with_inputs('question', 'conversation_history')
-        trainset.append(ex)
+        train_set.append(ex)
 
-    # Split into train and validation
-    random.shuffle(trainset)
-    split_idx = int(len(trainset) * 0.8)
-    train_set = trainset[:split_idx]
-    val_set = trainset[split_idx:]
+    val_set = []
+    for sample in val_samples:
+        ex = dspy.Example(
+            question=sample.question,
+            conversation_history=sample.conversation_history,
+            reference_doc_ids=sample.reference_doc_ids,
+            reference_docs=sample.reference_docs,
+            task_id=sample.task_id
+        ).with_inputs('question', 'conversation_history')
+        val_set.append(ex)
 
     print(f"Training set: {len(train_set)} samples")
     print(f"Validation set: {len(val_set)} samples")
 
     # Initialize GEPA optimizer
-    from dspy.teleprompt import GEPA
-
     optimizer = GEPA(
         metric=metric,
-        train_set=train_set,
-        val_set=val_set,
-        teacher_settings=dict(lm=teacher_lm),
-        num_threads=num_threads
+        auto="light",
+        num_threads=num_threads,
+        track_stats=True,
+        reflection_minibatch_size=3,
+        reflection_lm=lm_teacher
     )
 
     # Run optimization
     print("\nRunning GEPA optimization...")
-    optimized_retriever = optimizer.compile(retriever)
+    optimized_retriever = optimizer.compile(
+        retriever,
+        trainset=train_set,
+        valset=val_set
+    )
 
     # Save optimized model
     optimized_retriever.save(output_path)
@@ -436,22 +311,22 @@ def run_optimization(
 def main():
     parser = argparse.ArgumentParser(description="Optimize Multi-Hop RAG with GEPA")
     parser.add_argument(
-        "--reference-file",
+        "--train-file",
         type=str,
-        default="human/generation_tasks/reference.jsonl",
-        help="Path to reference JSONL file"
+        required=True,
+        help="Path to training dataset JSONL (from build_optimization_dataset.py)"
     )
     parser.add_argument(
-        "--samples",
-        type=int,
-        default=100,
-        help="Number of training samples"
+        "--val-file",
+        type=str,
+        required=True,
+        help="Path to validation dataset JSONL (from build_optimization_dataset.py)"
     )
     parser.add_argument(
         "--collection",
         type=str,
         default=None,
-        help="Specific collection to use (default: use collection from each sample)"
+        help="Specific collection to use (default: most common from samples)"
     )
     parser.add_argument(
         "--output",
@@ -465,35 +340,29 @@ def main():
         default=4,
         help="Number of parallel threads"
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed"
-    )
 
     args = parser.parse_args()
 
     print("="*60)
     print("MULTI-HOP RAG OPTIMIZATION")
     print("="*60)
-    print(f"Reference file: {args.reference_file}")
-    print(f"Samples: {args.samples}")
+    print(f"Train file: {args.train_file}")
+    print(f"Val file: {args.val_file}")
     print(f"Output: {args.output}")
     print(f"Student: {STUDENT_MODEL}")
     print(f"Teacher: {TEACHER_MODEL}")
     print(f"Judge: {JUDGE_MODEL}")
 
-    # Load and sample data
-    print("\n[1/3] Loading reference data...")
-    data = load_reference_data(args.reference_file)
-    print(f"Loaded {len(data)} entries with contexts")
+    # Load pre-built datasets
+    print("\n[1/3] Loading datasets...")
+    train_samples = load_dataset(args.train_file)
+    val_samples = load_dataset(args.val_file)
 
-    print("\n[2/3] Creating stratified sample...")
-    samples = stratified_sample(data, n_samples=args.samples, seed=args.seed)
+    print_dataset_distribution(train_samples, "Train set")
+    print_dataset_distribution(val_samples, "Val set")
 
     # Setup retrieval infrastructure
-    print("\n[3/3] Initializing retrieval infrastructure...")
+    print("\n[2/3] Initializing retrieval infrastructure...")
     config = load_config()
     embedding_service = EmbeddingService(config.embedding)
     vector_store = VectorStore(config.qdrant, embedding_service)
@@ -504,34 +373,19 @@ def main():
         collection_name = args.collection
     else:
         # Use the most common collection from samples
-        collections = [s.collection for s in samples]
+        all_samples = train_samples + val_samples
+        collections = [s.collection for s in all_samples]
         collection_name = max(set(collections), key=collections.count)
 
     print(f"Using collection: {collection_name}")
 
-    # Map collection names to corpus-compatible names
-    collection_mapping = {
-        'mt-rag-clapnq-elser-512-100-20240503': 'clapnq',
-        'mt-rag-fiqa-beir-elser-512-100-20240501': 'fiqa',
-        'mt-rag-govt-elser-512-100-20240611': 'govt',
-        'mt-rag-ibmcloud-elser-512-100-20240502': 'cloud'
-    }
-
-    corpus_name = collection_mapping.get(collection_name, collection_name)
-
-    # Load BM25 index
-    corpus_file = f"corpora/passage_level/{corpus_name}.jsonl"
-    if os.path.exists(corpus_file):
-        print(f"Loading BM25 index from {corpus_file}...")
-        hybrid_retriever.index_corpus_bm25(corpus_name, corpus_file)
-    else:
-        print(f"Warning: Corpus file not found: {corpus_file}")
-
     # Run optimization
+    print("\n[3/3] Running optimization...")
     optimized = run_optimization(
-        samples=samples,
+        train_samples=train_samples,
+        val_samples=val_samples,
         hybrid_retriever=hybrid_retriever,
-        collection_name=corpus_name,
+        collection_name=collection_name,
         output_path=args.output,
         num_threads=args.threads
     )

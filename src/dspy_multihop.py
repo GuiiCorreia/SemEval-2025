@@ -181,7 +181,6 @@ class MultiHopRetriever(dspy.Module):
             collection_name: Name of the document collection
             num_hops: Number of retrieval hops (default: 3)
             candidates_per_query: Docs to retrieve per query before rerank (default: 10)
-            final_docs_per_hop: Final docs after reranking per hop (default: 10)
         """
         super().__init__()
         self.hybrid_retriever = hybrid_retriever
@@ -198,7 +197,7 @@ class MultiHopRetriever(dspy.Module):
             return "No previous conversation."
 
         formatted = []
-        for msg in conversation_history[-10:]:
+        for msg in conversation_history:
             speaker = msg.get('speaker', 'unknown')
             text = msg.get('text', '')
             formatted.append(f"{speaker}: {text}")
@@ -286,59 +285,86 @@ class MultiHopRetriever(dspy.Module):
             print(f"HOP {hop_num}/{self.num_hops}")
             print(f"{'='*50}")
 
-            # Get accumulated notes
-            notes_str = self._format_notes(result.hop_results)
+            try:
+                # Get accumulated notes
+                notes_str = self._format_notes(result.hop_results)
 
-
-            # Generate 3 queries
-            print("Generating queries...")
-            query_result = self.query_generator(
-                question=question,
-                conversation_history=formatted_history,
-                notes=notes_str
-            )
-            queries = query_result.queries
-            result.all_queries.extend(queries)
-
-            print(f"  Query 1: {queries[0]}")
-            print(f"  Query 2: {queries[1]}")
-            print(f"  Query 3: {queries[2]}")
-
-            # Retrieve and rerank
-            print("Retrieving and reranking...")
-            reranked_docs, candidates_count = self._retrieve_and_rerank(queries)
-            print(f"  Candidates: {candidates_count} -> Reranked: {len(reranked_docs)}")
-
-            # Build notes (except for last hop)
-            notes_dict = None
-            if hop_num < self.num_hops:
-                print("Building notes...")
-                notes_result = self.notes_builder(
+                # Generate 3 queries
+                print("Generating queries...")
+                query_result = self.query_generator(
                     question=question,
-                    queries_used=queries,
-                    retrieved_documents=reranked_docs,
-                    previous_notes=notes_str
+                    conversation_history=formatted_history,
+                    notes=notes_str
                 )
-                notes_dict = {
-                    'key_findings': notes_result.key_findings,
-                    'missing_info': notes_result.missing_info,
-                    'search_suggestions': notes_result.search_suggestions
-                }
-                print(f"  Key findings: {notes_result.key_findings}")
+                queries = query_result.queries
 
-            # Store hop result
-            hop_result = HopResult(
-                hop_number=hop_num,
-                queries=queries,
-                candidates_count=candidates_count,
-                reranked_documents=reranked_docs,
-                notes=notes_dict
-            )
-            result.hop_results.append(hop_result)
+                # Filter out None queries
+                valid_queries = [q for q in queries if q is not None]
+                if not valid_queries:
+                    print(f"  Warning: No valid queries generated, skipping hop {hop_num}")
+                    continue
+
+                queries = valid_queries
+                result.all_queries.extend(queries)
+
+                for i, q in enumerate(queries, 1):
+                    print(f"  Query {i}: {q}")
+
+                # Retrieve and rerank
+                print("Retrieving and reranking...")
+                reranked_docs, candidates_count = self._retrieve_and_rerank(queries)
+                print(f"  Candidates: {candidates_count} -> Reranked: {len(reranked_docs)}")
+
+                # Build notes (except for last hop)
+                notes_dict = None
+                if hop_num < self.num_hops:
+                    print("Building notes...")
+                    notes_result = self.notes_builder(
+                        question=question,
+                        queries_used=queries,
+                        retrieved_documents=reranked_docs,
+                        previous_notes=notes_str
+                    )
+                    notes_dict = {
+                        'key_findings': notes_result.key_findings,
+                        'missing_info': notes_result.missing_info,
+                        'search_suggestions': notes_result.search_suggestions
+                    }
+                    print(f"  Key findings: {notes_result.key_findings}")
+
+                # Store hop result
+                hop_result = HopResult(
+                    hop_number=hop_num,
+                    queries=queries,
+                    candidates_count=candidates_count,
+                    reranked_documents=reranked_docs,
+                    notes=notes_dict
+                )
+                result.hop_results.append(hop_result)
+
+            except Exception as e:
+                print(f"  Error in hop {hop_num}: {e}, continuing with existing documents...")
 
         # Aggregate final documents (deduplicated from all hops)
-        result.final_documents = self._aggregate_documents(result.hop_results)
-        print(f"\nTotal unique documents: {len(result.final_documents)}")
+        aggregated_docs = self._aggregate_documents(result.hop_results)
+        print(f"\nTotal unique documents: {len(aggregated_docs)}")
+
+        # Final reranking using all generated queries
+        if aggregated_docs and result.all_queries:
+            print("Final reranking...")
+            rerank_query = " | ".join(result.all_queries)
+            reranked_final = self.hybrid_retriever.rerank_candidates(rerank_query, aggregated_docs)
+            result.final_documents = reranked_final
+            print(f"Final documents after rerank: {len(result.final_documents)}")
+        elif aggregated_docs:
+            # No queries but have docs - use original question for rerank
+            print("Final reranking with original question...")
+            reranked_final = self.hybrid_retriever.rerank_candidates(question, aggregated_docs)
+            result.final_documents = reranked_final
+            print(f"Final documents after rerank: {len(result.final_documents)}")
+        else:
+            print("No documents retrieved from any hop")
+            result.final_documents = []
 
         return dspy.Prediction(
             question=result.question,
@@ -359,7 +385,7 @@ class MultiHopRetriever(dspy.Module):
         # Process in reverse order (later hops likely have more refined results)
         for hr in reversed(hop_results):
             for doc in hr.reranked_documents:
-                doc_id = doc.get('document_id', doc.get('text', '')[:100])
+                doc_id = doc['document_id']
                 if doc_id not in seen_ids:
                     seen_ids.add(doc_id)
                     all_docs.append(doc)

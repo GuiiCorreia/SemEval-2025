@@ -1,0 +1,62 @@
+{
+  "created_at": "2026-01-19T13:44:16.447075",
+  "config": {
+    "n_samples": 50,
+    "val_ratio": 0.5,
+    "seed": 42
+  },
+  "train": {
+    "total": 29,
+    "by_collection": {
+      "mt-rag-govt-elser-512-100-20240611": 7,
+      "mt-rag-fiqa-beir-elser-512-100-20240501": 8,
+      "mt-rag-ibmcloud-elser-512-100-20240502": 8,
+      "mt-rag-clapnq-elser-512-100-20240503": 6
+    },
+    "by_answerability": {
+      "UNANSWERABLE": 8,
+      "PARTIAL": 8,
+      "ANSWERABLE": 8,
+      "CONVERSATIONAL": 5
+    },
+    "by_question_type": {
+      "Keyword": 5,
+      "Opinion": 7,
+      "Summarization": 5,
+      "Non-Question": 9,
+      "Troubleshooting": 3,
+      "Explanation": 5,
+      "Factoid": 9,
+      "How-To": 5,
+      "Comparative": 4,
+      "Composite": 5
+    }
+  },
+  "val": {
+    "total": 19,
+    "by_collection": {
+      "mt-rag-clapnq-elser-512-100-20240503": 6,
+      "mt-rag-fiqa-beir-elser-512-100-20240501": 6,
+      "mt-rag-govt-elser-512-100-20240611": 3,
+      "mt-rag-ibmcloud-elser-512-100-20240502": 4
+    },
+    "by_answerability": {
+      "PARTIAL": 5,
+      "UNANSWERABLE": 5,
+      "ANSWERABLE": 6,
+      "CONVERSATIONAL": 3
+    },
+    "by_question_type": {
+      "Factoid": 5,
+      "Opinion": 3,
+      "Non-Question": 7,
+      "Comparative": 3,
+      "Composite": 2,
+      "Troubleshooting": 2,
+      "How-To": 3,
+      "Summarization": 3,
+      "Explanation": 3,
+      "Keyword": 2
+    }
+  }
+}
