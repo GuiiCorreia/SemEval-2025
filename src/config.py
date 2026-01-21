@@ -25,10 +25,20 @@ class EmbeddingConfig:
 @dataclass
 class TextModelConfig:
     """Configuration for text generation models"""
-    model_id: str = "gemini-2.5-flash"
+    model_id: str = "gemini-3-flash-preview"
     temperature: float = 0.1
-    max_tokens: int = 1024
+    max_tokens: int = 16384
     top_p: float = 0.9
+    api_key: Optional[str] = None
+    provider: str = "gemini"  # gemini, openai, anthropic, etc.
+
+
+@dataclass
+class QueryModelConfig:
+    """Configuration for query generation models"""
+    model_id: str = "gemini-3-flash-preview"
+    temperature: float = 0.4
+    max_tokens: int = 4096
     api_key: Optional[str] = None
     provider: str = "gemini"  # gemini, openai, anthropic, etc.
 
@@ -46,7 +56,7 @@ class RetrievalConfig:
     """Configuration for retrieval parameters"""
     bm25_top_k: int = 10
     dense_top_k: int = 10
-    final_top_k: int = 5
+    final_top_k: int = 10
     max_candidates: int = 50
     retrieval_mode: str = "hybrid"  # "hybrid", "dense_only", "bm25_only"
 
@@ -66,10 +76,11 @@ class SystemConfig:
     """Main configuration class for the multi-turn RAG system"""
     embedding: EmbeddingConfig
     text_model: TextModelConfig
+    query_model: QueryModelConfig
     qdrant: QdrantConfig
     retrieval: RetrievalConfig
     query_diversification: QueryDiversificationConfig
-    
+
     def __init__(self):
         self.embedding = EmbeddingConfig(
             model_id=os.getenv("EMBEDDING_MODEL_ID", "gemini-embedding-001"),
@@ -78,12 +89,19 @@ class SystemConfig:
             provider=os.getenv("EMBEDDING_PROVIDER", "gemini")
         )
         self.text_model = TextModelConfig(
-            model_id=os.getenv("TEXT_MODEL_ID", "gemini-2.5-flash"),
+            model_id=os.getenv("TEXT_MODEL_ID", "gemini-3-flash-preview"),
             temperature=float(os.getenv("TEXT_MODEL_TEMPERATURE", "0.1")),
-            max_tokens=int(os.getenv("TEXT_MODEL_MAX_TOKENS", "1024")),
+            max_tokens=int(os.getenv("TEXT_MODEL_MAX_TOKENS", "16384")),
             top_p=float(os.getenv("TEXT_MODEL_TOP_P", "0.9")),
             api_key=os.getenv("GEMINI_API_KEY"),
             provider=os.getenv("TEXT_MODEL_PROVIDER", "gemini")
+        )
+        self.query_model = QueryModelConfig(
+            model_id=os.getenv("QUERY_MODEL_ID", "gemini-3-flash-preview"),
+            temperature=float(os.getenv("QUERY_MODEL_TEMPERATURE", "0.4")),
+            max_tokens=int(os.getenv("QUERY_MODEL_MAX_TOKENS", "4096")),
+            api_key=os.getenv("GEMINI_API_KEY"),
+            provider=os.getenv("QUERY_MODEL_PROVIDER", "gemini")
         )
         self.qdrant = QdrantConfig(
             url=os.getenv("QDRANT_URL"),
@@ -92,7 +110,7 @@ class SystemConfig:
         self.retrieval = RetrievalConfig(
             bm25_top_k=int(os.getenv("BM25_TOP_K", "10")),
             dense_top_k=int(os.getenv("DENSE_TOP_K", "10")),
-            final_top_k=int(os.getenv("FINAL_TOP_K", "5")),
+            final_top_k=int(os.getenv("FINAL_TOP_K", "10")),
             max_candidates=int(os.getenv("MAX_CANDIDATES", "50")),
             retrieval_mode=os.getenv("RETRIEVAL_MODE", "hybrid")
         )
@@ -158,7 +176,18 @@ def create_config_from_yaml(yaml_config: Dict[str, Any]) -> SystemConfig:
             config.text_model.max_tokens = text_config['max_tokens']
         if 'top_p' in text_config:
             config.text_model.top_p = text_config['top_p']
-    
+
+    if 'query_model' in yaml_config:
+        query_config = yaml_config['query_model']
+        if 'provider' in query_config:
+            config.query_model.provider = query_config['provider']
+        if 'model_id' in query_config:
+            config.query_model.model_id = query_config['model_id']
+        if 'temperature' in query_config:
+            config.query_model.temperature = query_config['temperature']
+        if 'max_tokens' in query_config:
+            config.query_model.max_tokens = query_config['max_tokens']
+
     if 'retrieval' in yaml_config:
         ret_config = yaml_config['retrieval']
         if 'bm25_top_k' in ret_config:

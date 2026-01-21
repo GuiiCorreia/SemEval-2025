@@ -113,7 +113,7 @@ class Pipeline:
 
         # Phase 5: Answerability Classification
         print("Phase 5: Answerability Detection...")
-        answerability = self.answerability_detector.classify(reformulated_query, top_documents)
+        answerability = self.answerability_detector.classify(reformulated_query, top_documents[:5])
         print(f"Answerability: {answerability.value}")
 
         # Phase 6: Conditional Response Generation
@@ -121,7 +121,7 @@ class Pipeline:
         response = self.response_generator.generate_response(
             answerability,
             reformulated_query,
-            top_documents,
+            top_documents[:5],
             conversation_history
         )
 

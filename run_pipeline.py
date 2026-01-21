@@ -21,6 +21,21 @@ from src import create_pipeline
 # Load environment variables
 load_dotenv()
 
+# =============================================================================
+# COLLECTION NAME MAPPING
+# =============================================================================
+# Maps short collection names to full Qdrant collection names (BM25 index names)
+COLLECTION_MAPPING = {
+    "clapnq": "mt-rag-clapnq-elser-512-100-20240503",
+    "fiqa": "mt-rag-fiqa-beir-elser-512-100-20240501",
+    "govt": "mt-rag-govt-elser-512-100-20240611",
+    "ibmcloud": "mt-rag-ibmcloud-elser-512-100-20240502",
+}
+
+def resolve_collection_name(collection: str) -> str:
+    """Resolve short collection name to full Qdrant collection name."""
+    return COLLECTION_MAPPING.get(collection.lower(), collection)
+
 
 def load_queries(queries_file: str) -> List[Dict[str, Any]]:
     """Load queries from JSONL file"""
@@ -127,10 +142,12 @@ def run_retrieval_experiment(
     
     # Save results
     print(f"Saving {len(results)} results to {output_file}...")
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, 'w', encoding='utf-8') as f:
         for result in results:
             f.write(json.dumps(result) + '\n')
-    
+
     print(f"✓ Retrieval experiment complete! Results saved to {output_file}")
 
 
@@ -234,10 +251,12 @@ def run_generation_experiment(
     
     # Save results
     print(f"Saving {len(results)} results to {output_file}...")
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, 'w', encoding='utf-8') as f:
         for result in results:
             f.write(json.dumps(result) + '\n')
-    
+
     print(f"✓ Generation experiment complete! Results saved to {output_file}")
 
 
@@ -315,16 +334,21 @@ def main():
         print(f"Loading queries from {args.queries}...")
         queries = load_queries(args.queries)
         print(f"Loaded {len(queries)} queries")
-        
+
+        # Resolve collection name
+        collection_name = resolve_collection_name(args.collection)
+        if collection_name != args.collection:
+            print(f"Resolved collection: {args.collection} -> {collection_name}")
+
         # Run experiments
         if args.mode in ['retrieval', 'both']:
             run_retrieval_experiment(
-                pipeline, queries, args.collection, args.output_retrieval
+                pipeline, queries, collection_name, args.output_retrieval
             )
-        
+
         if args.mode in ['generation', 'both']:
             run_generation_experiment(
-                pipeline, queries, args.collection, args.output_generation
+                pipeline, queries, collection_name, args.output_generation
             )
         
         print("\n✓ All experiments completed successfully!")

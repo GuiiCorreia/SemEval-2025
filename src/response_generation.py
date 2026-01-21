@@ -26,8 +26,17 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+class EmptyResponseError(Exception):
+    """Raised when model returns empty/None response"""
+    pass
+
+
 def is_api_error(exception):
     """Check if exception is an API error that should be retried"""
+    # Retry on empty responses
+    if isinstance(exception, EmptyResponseError):
+        return True
+
     error_str = str(exception).lower()
     return any([
         '429' in error_str,
@@ -79,7 +88,7 @@ class ResponseGenerator:
         """
         # Format conversation history
         history_text = ""
-        for msg in conversation_history[-5:]:  # Last 5 messages for context
+        for msg in conversation_history:  # Last 5 messages for context
             speaker = msg.get('speaker', 'unknown')
             text = msg.get('text', '')
             history_text += f"{speaker}: {text}\n"
@@ -87,7 +96,7 @@ class ResponseGenerator:
         # Format documents
         docs_text = ""
         for i, doc in enumerate(documents):
-            docs_text += f"Document {i+1}:\nTitle: {doc.get('title', 'N/A')}\nContent: {doc['text'][:800]}\n\n"
+            docs_text += f"Document {i+1}:\nTitle: {doc.get('title', 'N/A')}\nContent: {doc['text']}\n\n"
 
         prompt = f"""You are a helpful assistant. Answer the question based ONLY on the provided documents and conversation context.
 
@@ -118,10 +127,21 @@ Answer:"""
                     "top_p": self.config.top_p
                 }
             )
+            # Check for empty response and retry
+            if response.text is None:
+                finish_reason = None
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    finish_reason = getattr(candidate, 'finish_reason', None)
+                    print(f"DEBUG [generate_complete_answer] - response.text is None, finish_reason: {finish_reason}")
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             return response.text.strip()
+        except EmptyResponseError:
+            raise  # Let retry handle it
         except Exception as e:
             print(f"Error generating complete answer: {e}")
-            return "I apologize, but I'm unable to generate a response at this time due to a technical error."
+            raise
     
     @retry(
         retry=retry_if_exception(is_api_error),
@@ -150,7 +170,7 @@ Answer:"""
         # Format documents
         docs_text = ""
         for i, doc in enumerate(documents):
-            docs_text += f"Document {i+1}:\nTitle: {doc.get('title', 'N/A')}\nContent: {doc['text'][:800]}\n\n"
+            docs_text += f"Document {i+1}:\nTitle: {doc.get('title', 'N/A')}\nContent: {doc['text']}\n\n"
 
         prompt = f"""Based on the provided documents, you can only partially answer the user's question.
 
@@ -178,10 +198,21 @@ Response:"""
                     "top_p": self.config.top_p
                 }
             )
+            # Check for empty response and retry
+            if response.text is None:
+                finish_reason = None
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    finish_reason = getattr(candidate, 'finish_reason', None)
+                    print(f"DEBUG [generate_partial_answer] - response.text is None, finish_reason: {finish_reason}")
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             return response.text.strip()
+        except EmptyResponseError:
+            raise  # Let retry handle it
         except Exception as e:
             print(f"Error generating partial answer: {e}")
-            return "I can only partially address your question based on the available information. However, I'm experiencing technical difficulties in generating a detailed response."
+            raise
     
     @retry(
         retry=retry_if_exception(is_api_error),
@@ -207,7 +238,7 @@ Response:"""
         """
         # Format conversation history
         history_text = ""
-        for msg in conversation_history[-3:]:  # Last 3 messages for context
+        for msg in conversation_history:  # messages for context
             speaker = msg.get('speaker', 'unknown')
             text = msg.get('text', '')
             history_text += f"{speaker}: {text}\n"
@@ -237,10 +268,21 @@ Clarification Request:"""
                     "top_p": self.config.top_p
                 }
             )
+            # Check for empty response and retry
+            if response.text is None:
+                finish_reason = None
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    finish_reason = getattr(candidate, 'finish_reason', None)
+                    print(f"DEBUG [generate_clarification_request] - response.text is None, finish_reason: {finish_reason}")
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             return response.text.strip()
+        except EmptyResponseError:
+            raise  # Let retry handle it
         except Exception as e:
             print(f"Error generating clarification request: {e}")
-            return "I don't have enough information to answer your question adequately. Could you please provide more context or clarify what specific information you're looking for?"
+            raise
     
     @retry(
         retry=retry_if_exception(is_api_error),
@@ -263,7 +305,7 @@ Clarification Request:"""
         # Format documents for guardrail checking
         docs_text = ""
         for i, doc in enumerate(documents[:3]):  # Limit for context
-            docs_text += f"Document {i+1}: {doc['text'][:500]}\n\n"
+            docs_text += f"Document {i+1}: {doc['text']}\n\n"
 
         # Check faithfulness
         faithfulness_prompt = f"""Check if this response is faithful to the source documents:
@@ -291,6 +333,15 @@ Issues Found:"""
                 }
             )
 
+            # Check for empty response and retry
+            if faithfulness_response.text is None:
+                finish_reason = None
+                if hasattr(faithfulness_response, 'candidates') and faithfulness_response.candidates:
+                    candidate = faithfulness_response.candidates[0]
+                    finish_reason = getattr(candidate, 'finish_reason', None)
+                    print(f"DEBUG [apply_guardrails] - faithfulness_response.text is None, finish_reason: {finish_reason}")
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             # Parse faithfulness score
             faithfulness_text = faithfulness_response.text.strip()
             faithfulness_score = 0.8  # default
@@ -309,7 +360,13 @@ Issues Found:"""
                     if issues_part and issues_part.lower() not in ['none', 'no issues']:
                         faithfulness_issues.append(issues_part)
 
+        except EmptyResponseError:
+            raise  # Let retry handle it
         except Exception as e:
+            # Check if it's a retryable API error
+            if is_api_error(e):
+                print(f"Retryable error in faithfulness checking: {e}")
+                raise  # Let retry handle it
             print(f"Error in faithfulness checking: {e}")
             faithfulness_score = 0.8
             faithfulness_issues = []

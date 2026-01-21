@@ -26,8 +26,17 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+class EmptyResponseError(Exception):
+    """Raised when model returns empty/None response"""
+    pass
+
+
 def is_api_error(exception):
     """Check if exception is an API error that should be retried"""
+    # Retry on empty responses
+    if isinstance(exception, EmptyResponseError):
+        return True
+
     error_str = str(exception).lower()
     return any([
         '429' in error_str,
@@ -113,6 +122,15 @@ Reasoning:"""
                 }
             )
 
+            # Check for empty response and retry
+            if response.text is None:
+                finish_reason = None
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    finish_reason = getattr(candidate, 'finish_reason', None)
+                    print(f"DEBUG [answerability.classify] - response.text is None, finish_reason: {finish_reason}")
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             response_text = response.text.strip().lower()
 
             # Parse the classification from the response
@@ -131,11 +149,17 @@ Reasoning:"""
                 # Default to answerable if we can't parse the response
                 return AnswerabilityType.ANSWERABLE
 
+        except EmptyResponseError:
+            raise  # Let retry handle it
         except Exception as e:
+            # Check if it's a retryable API error
+            if is_api_error(e):
+                print(f"Retryable error in answerability classification: {e}")
+                raise  # Let retry handle it
             print(f"Error in answerability classification: {e}")
             # Default to answerable on error
             return AnswerabilityType.ANSWERABLE
-    
+
     @retry(
         retry=retry_if_exception(is_api_error),
         stop=stop_after_attempt(5),
@@ -193,6 +217,15 @@ Reasoning: [your reasoning]"""
                 }
             )
 
+            # Check for empty response and retry
+            if response.text is None:
+                finish_reason = None
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    finish_reason = getattr(candidate, 'finish_reason', None)
+                    print(f"DEBUG [answerability.get_classification_confidence] - response.text is None, finish_reason: {finish_reason}")
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             response_text = response.text.strip()
 
             # Parse the response
@@ -225,7 +258,13 @@ Reasoning: [your reasoning]"""
                 "reasoning": reasoning
             }
 
+        except EmptyResponseError:
+            raise  # Let retry handle it
         except Exception as e:
+            # Check if it's a retryable API error
+            if is_api_error(e):
+                print(f"Retryable error in detailed answerability classification: {e}")
+                raise  # Let retry handle it
             print(f"Error in detailed answerability classification: {e}")
             return {
                 "classification": AnswerabilityType.ANSWERABLE,

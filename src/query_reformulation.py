@@ -16,7 +16,7 @@ from tenacity import (
     retry_if_exception,
     before_sleep_log
 )
-from .config import QueryDiversificationConfig, TextModelConfig
+from .config import QueryDiversificationConfig, QueryModelConfig
 
 # Load environment variables
 load_dotenv()
@@ -25,8 +25,17 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+class EmptyResponseError(Exception):
+    """Raised when model returns empty/None response"""
+    pass
+
+
 def is_api_error(exception):
     """Check if exception is an API error that should be retried"""
+    # Retry on empty responses
+    if isinstance(exception, EmptyResponseError):
+        return True
+
     error_str = str(exception).lower()
     return any([
         '429' in error_str,
@@ -44,10 +53,10 @@ def is_api_error(exception):
 
 class QueryReformulator:
     """Handles query reformulation using Chain-of-Thought reasoning"""
-    
-    def __init__(self, config: TextModelConfig = None):
+
+    def __init__(self, config: QueryModelConfig = None):
         """Initialize the query reformulator"""
-        self.config = config or TextModelConfig(
+        self.config = config or QueryModelConfig(
             api_key=os.getenv("GEMINI_API_KEY")
         )
         self.client = genai.Client(api_key=self.config.api_key)
@@ -72,7 +81,7 @@ class QueryReformulator:
         """
         # Format conversation history
         history_text = ""
-        for msg in conversation_history[-10:]:  # Limit to last 10 messages for context
+        for msg in conversation_history:
             speaker = msg.get('speaker', 'unknown')
             text = msg.get('text', '')
             history_text += f"{speaker}: {text}\n"
@@ -126,6 +135,15 @@ Rewritten Query:"""
                 }
             )
 
+            # Check for empty response and retry
+            if response.text is None:
+                finish_reason = None
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    finish_reason = getattr(candidate, 'finish_reason', None)
+                    print(f"DEBUG [cot_rewrite] - response.text is None, finish_reason: {finish_reason}")
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             # Extract and clean the rewritten query
             full_response = response.text.strip()
 
@@ -140,27 +158,32 @@ Rewritten Query:"""
 
             return result if result else query
 
+        except EmptyResponseError:
+            raise  # Let retry handle it
         except Exception as e:
+            if is_api_error(e):
+                print(f"Retryable error in query reformulation: {e}")
+                raise
             print(f"Error in query reformulation: {e}")
             return query  # Return original query if reformulation fails
 
 
 class QueryDiversifier:
     """Handles multi-strategy query diversification"""
-    
-    def __init__(self, config: QueryDiversificationConfig, text_model_config: TextModelConfig = None):
+
+    def __init__(self, config: QueryDiversificationConfig, query_model_config: QueryModelConfig = None):
         """
         Initialize the query diversifier
-        
+
         Args:
             config: Configuration for query diversification
-            text_model_config: Configuration for text model
+            query_model_config: Configuration for query model
         """
         self.config = config
-        self.text_model_config = text_model_config or TextModelConfig(
+        self.query_model_config = query_model_config or QueryModelConfig(
             api_key=os.getenv("GEMINI_API_KEY")
         )
-        self.client = genai.Client(api_key=self.text_model_config.api_key)
+        self.client = genai.Client(api_key=self.query_model_config.api_key)
     
     @retry(
         retry=retry_if_exception(is_api_error),
@@ -195,18 +218,29 @@ Entity-focused query:"""
 
         try:
             response = self.client.models.generate_content(
-                model=self.text_model_config.model_id,
+                model=self.query_model_config.model_id,
                 contents=prompt,
                 config={
                     "temperature": 0.4,
                     "max_output_tokens": 4096
                 }
             )
+            # Check for empty response and retry
+            if response.text is None:
+                finish_reason = None
+                if hasattr(response, 'candidates') and response.candidates:
+                    finish_reason = getattr(response.candidates[0], 'finish_reason', None)
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             result = response.text.strip()
             # Clean up any extra formatting
             result = result.replace('*', '').replace('#', '').split('\n')[0].strip()
             return result if result else query
+        except EmptyResponseError:
+            raise
         except Exception as e:
+            if is_api_error(e):
+                raise
             print(f"Error in entity focus generation: {e}")
             return query
     
@@ -244,20 +278,31 @@ Action-focused query:"""
 
         try:
             response = self.client.models.generate_content(
-                model=self.text_model_config.model_id,
+                model=self.query_model_config.model_id,
                 contents=prompt,
                 config={
                     "temperature": 0.4,
                     "max_output_tokens": 4096
                 }
             )
+            # Check for empty response and retry
+            if response.text is None:
+                finish_reason = None
+                if hasattr(response, 'candidates') and response.candidates:
+                    finish_reason = getattr(response.candidates[0], 'finish_reason', None)
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             result = response.text.strip()
             result = result.replace('*', '').replace('#', '').split('\n')[0].strip()
             return result if result else query
+        except EmptyResponseError:
+            raise
         except Exception as e:
+            if is_api_error(e):
+                raise
             print(f"Error in action focus generation: {e}")
             return query
-    
+
     @retry(
         retry=retry_if_exception(is_api_error),
         stop=stop_after_attempt(5),
@@ -293,17 +338,28 @@ Paraphrased query:"""
 
         try:
             response = self.client.models.generate_content(
-                model=self.text_model_config.model_id,
+                model=self.query_model_config.model_id,
                 contents=prompt,
                 config={
                     "temperature": 0.4,  # Slightly higher for lexical diversity
                     "max_output_tokens": 4096
                 }
             )
+            # Check for empty response and retry
+            if response.text is None:
+                finish_reason = None
+                if hasattr(response, 'candidates') and response.candidates:
+                    finish_reason = getattr(response.candidates[0], 'finish_reason', None)
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             result = response.text.strip()
             result = result.replace('*', '').replace('#', '').split('\n')[0].strip()
             return result if result else query
+        except EmptyResponseError:
+            raise
         except Exception as e:
+            if is_api_error(e):
+                raise
             print(f"Error in paraphrase generation: {e}")
             return query
     
@@ -341,17 +397,28 @@ Relation-focused query:"""
 
         try:
             response = self.client.models.generate_content(
-                model=self.text_model_config.model_id,
+                model=self.query_model_config.model_id,
                 contents=prompt,
                 config={
                     "temperature": 0.4,
                     "max_output_tokens": 4096
                 }
             )
+            # Check for empty response and retry
+            if response.text is None:
+                finish_reason = None
+                if hasattr(response, 'candidates') and response.candidates:
+                    finish_reason = getattr(response.candidates[0], 'finish_reason', None)
+                raise EmptyResponseError(f"Model returned empty response. finish_reason: {finish_reason}")
+
             result = response.text.strip()
             result = result.replace('*', '').replace('#', '').split('\n')[0].strip()
             return result if result else query
+        except EmptyResponseError:
+            raise
         except Exception as e:
+            if is_api_error(e):
+                raise
             print(f"Error in relation focus generation: {e}")
             return query
     
