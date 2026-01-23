@@ -25,9 +25,9 @@ class EmbeddingConfig:
 @dataclass
 class TextModelConfig:
     """Configuration for text generation models"""
-    model_id: str = "gemini-2.5-flash"
+    model_id: str = "gemini-3-flash-preview"
     temperature: float = 0.1
-    max_tokens: int = 1024
+    max_tokens: int = 15000
     top_p: float = 0.9
     api_key: Optional[str] = None
     provider: str = "gemini"  # gemini, openai, anthropic, etc.
@@ -78,9 +78,9 @@ class SystemConfig:
             provider=os.getenv("EMBEDDING_PROVIDER", "gemini")
         )
         self.text_model = TextModelConfig(
-            model_id=os.getenv("TEXT_MODEL_ID", "gemini-2.5-flash"),
+            model_id=os.getenv("TEXT_MODEL_ID", "gemini-3-flash-preview"),
             temperature=float(os.getenv("TEXT_MODEL_TEMPERATURE", "0.1")),
-            max_tokens=int(os.getenv("TEXT_MODEL_MAX_TOKENS", "1024")),
+            max_tokens=int(os.getenv("TEXT_MODEL_MAX_TOKENS", "1500")),
             top_p=float(os.getenv("TEXT_MODEL_TOP_P", "0.9")),
             api_key=os.getenv("GEMINI_API_KEY"),
             provider=os.getenv("TEXT_MODEL_PROVIDER", "gemini")

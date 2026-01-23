@@ -5,10 +5,11 @@ Main Script for Running the Multi-Turn RAG Pipeline
 This script provides a complete interface for running retrieval and generation
 experiments using the pipeline.
 
-Supports three modes:
+Supports four modes:
 - Original pipeline (default)
 - DSPy multi-hop RAG (--dspy-multihop) - retrieval only
 - DSPy full pipeline (--dspy-full) - retrieval + classification + generation
+- Integrated multi-hop (--multihop-retrieval) - DSPy multi-hop retrieval + original generation
 """
 
 import argparse
@@ -32,6 +33,26 @@ from src.dspy_pipeline import create_integrated_pipeline
 
 # Load environment variables
 load_dotenv()
+
+# Collection name mapping (short name -> full name)
+COLLECTION_MAPPING = {
+    "clapnq": "mt-rag-clapnq-elser-512-100-20240503",
+    "fiqa": "mt-rag-fiqa-beir-elser-512-100-20240501",
+    "govt": "mt-rag-govt-elser-512-100-20240611",
+    "ibmcloud": "mt-rag-ibmcloud-elser-512-100-20240502",
+}
+
+
+def resolve_collection_name(name: str) -> str:
+    """Resolve collection name from short name or return as-is if already full name."""
+    if not name:
+        return name
+    # Check if it's a short name
+    lower_name = name.lower()
+    if lower_name in COLLECTION_MAPPING:
+        return COLLECTION_MAPPING[lower_name]
+    # Return as-is (already full name or unknown)
+    return name
 
 
 def load_queries(queries_file: str) -> List[Dict[str, Any]]:
@@ -65,7 +86,8 @@ def run_retrieval_experiment(
 
         try:
             # Get collection for this query (use query's collection or fall back to default)
-            collection_name = query_item.get('Collection', default_collection)
+            raw_collection = query_item.get('Collection', default_collection)
+            collection_name = resolve_collection_name(raw_collection)
 
             # Extract conversation history from query item
             conversation_history = []
@@ -93,52 +115,33 @@ def run_retrieval_experiment(
                 retrieval_only=True
             )
 
-            # Format for retrieval evaluation (compatible with evaluation template)
+            # Format for Task A retrieval evaluation
             retrieved_docs = []
-            # Get detailed retrieval results from pipeline metadata
+            # Get detailed retrieval results from pipeline metadata (10 docs)
             retrieval_results = response.get('pipeline_metadata', {}).get('retrieved_documents', [])
 
-            # Use detailed retrieval results (should always be available)
-            for doc in retrieval_results:
+            # Format contexts for evaluation (document_id, score, text required)
+            for doc in retrieval_results[:10]:  # Ensure max 10 docs for Task A
                 retrieved_docs.append({
                     'document_id': doc.get('document_id', ''),
                     'score': doc.get('final_score', doc.get('score', 1.0)),
-                    'source': doc.get('source', ''),
                     'text': doc.get('text', ''),
-                    'title': doc.get('title', '')
+                    'title': doc.get('title', ''),
+                    'source': doc.get('source', '')
                 })
 
+            # Task A format: conversation_id, task_id, Collection, input, contexts
             result = {
-                'task_id': query_item.get('_id', f"query_{i}"),
                 'Collection': collection_name,
-                'contexts': retrieved_docs,
                 'input': conversation_history,
-                'targets': query_item.get('targets', [{'speaker': 'agent', 'text': ''}]),
-                'metadata': {
-                    'reference_contexts': query_item.get('contexts', []),
-                    'pipeline_metadata': response.get('pipeline_metadata', {})
-                }
+                'contexts': retrieved_docs
             }
 
-            # Propagate original metadata from input
+            # Required fields for Task A
             if 'conversation_id' in query_item:
                 result['conversation_id'] = query_item['conversation_id']
             if 'task_id' in query_item:
                 result['task_id'] = query_item['task_id']
-            if 'task_type' in query_item:
-                result['task_type'] = query_item['task_type']
-            if 'turn' in query_item:
-                result['turn'] = query_item['turn']
-            if 'Question Type' in query_item:
-                result['Question Type'] = query_item['Question Type']
-            if 'No. References' in query_item:
-                result['No. References'] = query_item['No. References']
-            if 'Multi-Turn' in query_item:
-                result['Multi-Turn'] = query_item['Multi-Turn']
-            if 'Answerability' in query_item:
-                result['Answerability'] = query_item['Answerability']
-            if 'dataset' in query_item:
-                result['dataset'] = query_item['dataset']
 
             results.append(result)
 
@@ -175,7 +178,8 @@ def run_generation_experiment(
 
         try:
             # Get collection for this query (use query's collection or fall back to default)
-            collection_name = query_item.get('Collection', default_collection)
+            raw_collection = query_item.get('Collection', default_collection)
+            collection_name = resolve_collection_name(raw_collection)
 
             # Extract conversation history
             conversation_history = []
@@ -201,59 +205,37 @@ def run_generation_experiment(
                 collection_name=collection_name
             )
 
-            # Format for generation evaluation (compatible with evaluation template)
+            # Format for Task C RAG evaluation
             retrieved_docs = []
             # Get detailed retrieval results from pipeline metadata
             retrieval_results = response.get('pipeline_metadata', {}).get('retrieved_documents', [])
 
-            # Use detailed retrieval results (should always be available)
-            for doc in retrieval_results:
+            # Use only top 5 docs for Task C contexts
+            for doc in retrieval_results[:5]:
                 retrieved_docs.append({
                     'document_id': doc.get('document_id', ''),
                     'score': doc.get('final_score', doc.get('score', 1.0)),
-                    'source': doc.get('source', ''),
                     'text': doc.get('text', ''),
-                    'title': doc.get('title', '')
+                    'title': doc.get('title', ''),
+                    'source': doc.get('source', '')
                 })
 
+            # Task C format: conversation_id, task_id, Collection, input, contexts, predictions
             result = {
                 'Collection': collection_name,
                 'input': conversation_history,
-                'targets': query_item.get('targets', [{
-                    'speaker': 'agent',
-                    'text': ''
-                }]),
+                'contexts': retrieved_docs,
                 'predictions': [{
                     'text': response['response_text']
-                }],
-                'contexts': retrieved_docs,
-                'metadata': {
-                    'confidence_score': response.get('confidence_score', 0.0),
-                    'answerability': response.get('pipeline_metadata', {}).get('answerability', 'A'),
-                    'guardrail_flags': response.get('guardrail_flags', {}),
-                    'pipeline_metadata': response.get('pipeline_metadata', {})
-                }
+                }]
             }
 
-            # Propagate original metadata from input
+            # Required fields for Task C
             if 'conversation_id' in query_item:
                 result['conversation_id'] = query_item['conversation_id']
             if 'task_id' in query_item:
                 result['task_id'] = query_item['task_id']
-            if 'task_type' in query_item:
-                result['task_type'] = query_item['task_type']
-            if 'turn' in query_item:
-                result['turn'] = query_item['turn']
-            if 'Question Type' in query_item:
-                result['Question Type'] = query_item['Question Type']
-            if 'No. References' in query_item:
-                result['No. References'] = query_item['No. References']
-            if 'Multi-Turn' in query_item:
-                result['Multi-Turn'] = query_item['Multi-Turn']
-            if 'Answerability' in query_item:
-                result['Answerability'] = query_item['Answerability']
-            if 'dataset' in query_item:
-                result['dataset'] = query_item['dataset']
+
             results.append(result)
 
         except Exception as e:
@@ -267,6 +249,134 @@ def run_generation_experiment(
             f.write(json.dumps(result) + '\n')
 
     print(f"✓ Generation experiment complete! Results saved to {output_file}")
+
+
+def run_multihop_full_experiment(
+    pipeline,
+    queries: List[Dict[str, Any]],
+    default_collection: str,
+    output_retrieval: str,
+    output_generation: str
+):
+    """Run full pipeline once and save both Task A (retrieval) and Task C (RAG) outputs.
+
+    This is more efficient than running retrieval and generation separately
+    since it processes each query only once.
+    """
+    print(f"Running full pipeline experiment on {len(queries)} queries...")
+    print(f"  Task A output (10 docs): {output_retrieval}")
+    print(f"  Task C output (5 docs + predictions): {output_generation}")
+
+    results_retrieval = []  # Task A: 10 docs
+    results_generation = []  # Task C: 5 docs + predictions
+
+    for i, query_item in enumerate(queries):
+        if i % 10 == 0:
+            print(f"Processing query {i+1}/{len(queries)}...")
+
+        try:
+            # Get collection for this query
+            raw_collection = query_item.get('Collection', default_collection)
+            collection_name = resolve_collection_name(raw_collection)
+
+            # Extract conversation history
+            conversation_history = []
+            if 'input' in query_item:
+                conversation_history = query_item['input']
+
+            # Get current question
+            current_question = query_item.get('text', '')
+            if not current_question and conversation_history:
+                for msg in reversed(conversation_history):
+                    if msg.get('speaker') == 'user':
+                        current_question = msg.get('text', '')
+                        break
+
+            if not current_question:
+                print(f"Warning: No question found for query {i}")
+                continue
+
+            # Run full pipeline (retrieval + generation) ONCE
+            response = pipeline.process_query(
+                current_question=current_question,
+                conversation_history=conversation_history,
+                collection_name=collection_name,
+                retrieval_only=False  # Full pipeline
+            )
+
+            # Get retrieved documents
+            retrieval_results = response.get('pipeline_metadata', {}).get('retrieved_documents', [])
+
+            # === Task A: Retrieval (10 docs) ===
+            docs_task_a = []
+            for doc in retrieval_results[:10]:
+                docs_task_a.append({
+                    'document_id': doc.get('document_id', ''),
+                    'score': doc.get('final_score', doc.get('score', 1.0)),
+                    'text': doc.get('text', ''),
+                    'title': doc.get('title', ''),
+                    'source': doc.get('source', '')
+                })
+
+            result_a = {
+                'Collection': collection_name,
+                'input': conversation_history,
+                'contexts': docs_task_a
+            }
+            if 'conversation_id' in query_item:
+                result_a['conversation_id'] = query_item['conversation_id']
+            if 'task_id' in query_item:
+                result_a['task_id'] = query_item['task_id']
+
+            results_retrieval.append(result_a)
+
+            # === Task C: RAG (5 docs + predictions) ===
+            docs_task_c = []
+            for doc in retrieval_results[:5]:
+                docs_task_c.append({
+                    'document_id': doc.get('document_id', ''),
+                    'score': doc.get('final_score', doc.get('score', 1.0)),
+                    'text': doc.get('text', ''),
+                    'title': doc.get('title', ''),
+                    'source': doc.get('source', '')
+                })
+
+            result_c = {
+                'Collection': collection_name,
+                'input': conversation_history,
+                'contexts': docs_task_c,
+                'predictions': [{
+                    'text': response.get('response_text', '')
+                }]
+            }
+            if 'conversation_id' in query_item:
+                result_c['conversation_id'] = query_item['conversation_id']
+            if 'task_id' in query_item:
+                result_c['task_id'] = query_item['task_id']
+
+            results_generation.append(result_c)
+
+        except Exception as e:
+            print(f"Error processing query {i}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    # Save Task A results
+    print(f"\nSaving {len(results_retrieval)} Task A results to {output_retrieval}...")
+    with open(output_retrieval, 'w', encoding='utf-8') as f:
+        for result in results_retrieval:
+            f.write(json.dumps(result) + '\n')
+
+    # Save Task C results
+    print(f"Saving {len(results_generation)} Task C results to {output_generation}...")
+    with open(output_generation, 'w', encoding='utf-8') as f:
+        for result in results_generation:
+            f.write(json.dumps(result) + '\n')
+
+    print(f"✓ Full pipeline experiment complete!")
+    print(f"  Task A: {output_retrieval}")
+    print(f"  Task C: {output_generation}")
 
 
 def run_dspy_full_experiment(
@@ -289,7 +399,8 @@ def run_dspy_full_experiment(
 
         try:
             # Get collection for this query
-            collection_name = query_item.get('Collection', default_collection)
+            raw_collection = query_item.get('Collection', default_collection)
+            collection_name = resolve_collection_name(raw_collection)
 
             # Extract conversation history
             conversation_history = []
@@ -315,55 +426,35 @@ def run_dspy_full_experiment(
                 collection_name=collection_name
             )
 
-            # Format retrieved documents
+            # Format for Task C RAG evaluation
             retrieved_docs = []
             retrieval_results = response.get('pipeline_metadata', {}).get('retrieved_documents', [])
-            for doc in retrieval_results:
+
+            # Use only top 5 docs for Task C contexts
+            for doc in retrieval_results[:5]:
                 retrieved_docs.append({
                     'document_id': doc.get('document_id', ''),
                     'score': doc.get('final_score', doc.get('score', 1.0)),
-                    'source': doc.get('source', ''),
                     'text': doc.get('text', ''),
-                    'title': doc.get('title', '')
+                    'title': doc.get('title', ''),
+                    'source': doc.get('source', '')
                 })
 
-            # Build result in evaluation-compatible format
+            # Task C format: conversation_id, task_id, Collection, input, contexts, predictions
             result = {
                 'Collection': collection_name,
                 'input': conversation_history,
-                'targets': query_item.get('targets', [{
-                    'speaker': 'agent',
-                    'text': ''
-                }]),
+                'contexts': retrieved_docs,
                 'predictions': [{
                     'text': response.get('response_text', '')
-                }],
-                'contexts': retrieved_docs,
-                'metadata': {
-                    'classification': response.get('classification', ''),
-                    'pipeline_metadata': response.get('pipeline_metadata', {})
-                }
+                }]
             }
 
-            # Propagate original metadata from input
+            # Required fields for Task C
             if 'conversation_id' in query_item:
                 result['conversation_id'] = query_item['conversation_id']
             if 'task_id' in query_item:
                 result['task_id'] = query_item['task_id']
-            if 'task_type' in query_item:
-                result['task_type'] = query_item['task_type']
-            if 'turn' in query_item:
-                result['turn'] = query_item['turn']
-            if 'Question Type' in query_item:
-                result['Question Type'] = query_item['Question Type']
-            if 'No. References' in query_item:
-                result['No. References'] = query_item['No. References']
-            if 'Multi-Turn' in query_item:
-                result['Multi-Turn'] = query_item['Multi-Turn']
-            if 'Answerability' in query_item:
-                result['Answerability'] = query_item['Answerability']
-            if 'dataset' in query_item:
-                result['dataset'] = query_item['dataset']
 
             results.append(result)
 
@@ -476,13 +567,101 @@ def main():
         default=None,
         help='Path to optimized generator weights (for --dspy-full)'
     )
+    parser.add_argument(
+        '--multihop-retrieval',
+        action='store_true',
+        help='Use integrated mode: DSPy multi-hop retrieval + original answerability/generation'
+    )
 
     args = parser.parse_args()
+
+    # Resolve collection name if provided (supports short names like 'fiqa', 'govt', etc.)
+    if args.collection:
+        args.collection = resolve_collection_name(args.collection)
 
     # Load queries first
     print(f"Loading queries from {args.queries}...")
     queries = load_queries(args.queries)
     print(f"Loaded {len(queries)} queries")
+
+    # =========================================================================
+    # INTEGRATED MODE: DSPy Multi-hop Retrieval + Original Generation
+    # =========================================================================
+    if args.multihop_retrieval:
+        print("\n" + "="*60)
+        print("INTEGRATED MODE: DSPy Multi-hop Retrieval + Original Generation")
+        print("="*60)
+        print(f"  Model: {args.dspy_model}")
+        print(f"  Base URL: {args.dspy_base_url}")
+        print(f"  Hops: {args.num_hops}")
+        if args.retriever_path:
+            print(f"  Optimized retriever: {args.retriever_path}")
+
+        try:
+            import dspy
+
+            # Get API key
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not found in environment")
+
+            # Configure DSPy with ChatAdapter (disable JSON fallback for compatibility)
+            lm = dspy.LM(
+                args.dspy_model,
+                api_key=api_key,
+                base_url=args.dspy_base_url,
+                temperature=0.4,
+                max_tokens=10000
+            )
+            dspy.configure(lm=lm, adapter=dspy.ChatAdapter(use_json_adapter_fallback=False))
+
+            # Create integrated pipeline with multi-hop retrieval
+            pipeline = create_pipeline(
+                use_multihop=True,
+                multihop_model_path=args.retriever_path,
+                num_hops=args.num_hops
+            )
+
+            # Override retrieval mode if specified
+            if args.retrieval_mode:
+                print(f"Overriding retrieval mode to: {args.retrieval_mode}")
+                pipeline.hybrid_retriever.config.retrieval_mode = args.retrieval_mode
+
+            # Index corpus if provided
+            if args.index_corpus:
+                print(f"Indexing corpus {args.index_corpus}...")
+                collection_for_index = args.collection or "default"
+                success = pipeline.setup_collection(collection_for_index, args.index_corpus)
+                if not success:
+                    print("Failed to index corpus!")
+                    return 1
+
+            print("Integrated pipeline initialized!")
+
+            # Run experiments based on mode
+            if args.mode == 'both':
+                # Single pass: generates both Task A and Task C files
+                run_multihop_full_experiment(
+                    pipeline, queries, args.collection,
+                    args.output_retrieval, args.output_generation
+                )
+            elif args.mode == 'retrieval':
+                run_retrieval_experiment(
+                    pipeline, queries, args.collection, args.output_retrieval
+                )
+            elif args.mode == 'generation':
+                run_generation_experiment(
+                    pipeline, queries, args.collection, args.output_generation
+                )
+
+            print("\n✓ All experiments completed successfully!")
+            return 0
+
+        except Exception as e:
+            print(f"\n✗ Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
 
     # Check if DSPy full pipeline mode is enabled
     if args.dspy_full:

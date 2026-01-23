@@ -26,8 +26,15 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+class NoneResponseError(Exception):
+    """Raised when API returns None response"""
+    pass
+
+
 def is_api_error(exception):
     """Check if exception is an API error that should be retried"""
+    if isinstance(exception, NoneResponseError):
+        return True
     error_str = str(exception).lower()
     return any([
         '429' in error_str,
@@ -118,7 +125,11 @@ Answer:"""
                     "top_p": self.config.top_p
                 }
             )
+            if response.text is None:
+                raise NoneResponseError("API returned None response for complete answer")
             return response.text.strip()
+        except NoneResponseError:
+            raise  # Re-raise to trigger retry
         except Exception as e:
             print(f"Error generating complete answer: {e}")
             return "I apologize, but I'm unable to generate a response at this time due to a technical error."
@@ -178,7 +189,11 @@ Response:"""
                     "top_p": self.config.top_p
                 }
             )
+            if response.text is None:
+                raise NoneResponseError("API returned None response for partial answer")
             return response.text.strip()
+        except NoneResponseError:
+            raise  # Re-raise to trigger retry
         except Exception as e:
             print(f"Error generating partial answer: {e}")
             return "I can only partially address your question based on the available information. However, I'm experiencing technical difficulties in generating a detailed response."
@@ -237,7 +252,11 @@ Clarification Request:"""
                     "top_p": self.config.top_p
                 }
             )
+            if response.text is None:
+                raise NoneResponseError("API returned None response for clarification request")
             return response.text.strip()
+        except NoneResponseError:
+            raise  # Re-raise to trigger retry
         except Exception as e:
             print(f"Error generating clarification request: {e}")
             return "I don't have enough information to answer your question adequately. Could you please provide more context or clarify what specific information you're looking for?"
@@ -291,6 +310,9 @@ Issues Found:"""
                 }
             )
 
+            if faithfulness_response.text is None:
+                raise NoneResponseError("API returned None response for guardrails")
+
             # Parse faithfulness score
             faithfulness_text = faithfulness_response.text.strip()
             faithfulness_score = 0.8  # default
@@ -309,6 +331,8 @@ Issues Found:"""
                     if issues_part and issues_part.lower() not in ['none', 'no issues']:
                         faithfulness_issues.append(issues_part)
 
+        except NoneResponseError:
+            raise  # Re-raise to trigger retry
         except Exception as e:
             print(f"Error in faithfulness checking: {e}")
             faithfulness_score = 0.8

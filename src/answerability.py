@@ -26,8 +26,15 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+class NoneResponseError(Exception):
+    """Raised when API returns None response"""
+    pass
+
+
 def is_api_error(exception):
     """Check if exception is an API error that should be retried"""
+    if isinstance(exception, NoneResponseError):
+        return True
     error_str = str(exception).lower()
     return any([
         '429' in error_str,
@@ -109,9 +116,12 @@ Reasoning:"""
                 contents=prompt,
                 config={
                     "temperature": 0.0,  # Use 0 temperature for classification
-                    "max_output_tokens": 512
+                    "max_output_tokens": 8192
                 }
             )
+
+            if response.text is None:
+                raise NoneResponseError("API returned None response for answerability classification")
 
             response_text = response.text.strip().lower()
 
@@ -131,6 +141,8 @@ Reasoning:"""
                 # Default to answerable if we can't parse the response
                 return AnswerabilityType.ANSWERABLE
 
+        except NoneResponseError:
+            raise  # Re-raise to trigger retry
         except Exception as e:
             print(f"Error in answerability classification: {e}")
             # Default to answerable on error
@@ -189,9 +201,12 @@ Reasoning: [your reasoning]"""
                 contents=prompt,
                 config={
                     "temperature": 0.0,  # Use 0 temperature for classification
-                    "max_output_tokens": 512
+                    "max_output_tokens": 8192
                 }
             )
+
+            if response.text is None:
+                raise NoneResponseError("API returned None response for detailed classification")
 
             response_text = response.text.strip()
 
@@ -225,6 +240,8 @@ Reasoning: [your reasoning]"""
                 "reasoning": reasoning
             }
 
+        except NoneResponseError:
+            raise  # Re-raise to trigger retry
         except Exception as e:
             print(f"Error in detailed answerability classification: {e}")
             return {

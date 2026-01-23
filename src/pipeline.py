@@ -5,7 +5,7 @@ This module orchestrates the complete multi-turn RAG pipeline following the
 ERIGO2025 architecture.
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .config import SystemConfig, load_config
 from .embeddings import EmbeddingService
 from .vector_store import VectorStore
@@ -13,6 +13,7 @@ from .retrieval import HybridRetriever
 from .query_reformulation import QueryReformulator, QueryDiversifier
 from .answerability import AnswerabilityDetector, AnswerabilityType
 from .response_generation import ResponseGenerator
+from .dspy_multihop import create_multihop_retriever
 
 
 class Pipeline:
@@ -28,24 +29,52 @@ class Pipeline:
     6. Conditional Response Generation
     """
     
-    def __init__(self, config: SystemConfig = None):
+    def __init__(
+        self,
+        config: SystemConfig = None,
+        use_multihop: bool = False,
+        multihop_model_path: Optional[str] = None,
+        num_hops: int = 3
+    ):
         """
         Initialize the pipeline
-        
+
         Args:
             config: System configuration (loads default if None)
+            use_multihop: If True, use DSPy multi-hop retrieval instead of standard retrieval
+            multihop_model_path: Path to optimized multi-hop model (e.g., 'optimized_multihop.json')
+            num_hops: Number of retrieval hops for multi-hop mode (default: 3)
         """
         self.config = config or load_config()
-        
-        # Initialize components
+        self.use_multihop = use_multihop
+        self.multihop_model_path = multihop_model_path
+        self.num_hops = num_hops
+
+        # Initialize core components
         self.embedding_service = EmbeddingService(self.config.embedding)
         self.vector_store = VectorStore(self.config.qdrant, self.embedding_service)
         self.hybrid_retriever = HybridRetriever(self.config.retrieval, self.vector_store)
-        self.query_reformulator = QueryReformulator(self.config.text_model)
-        self.query_diversifier = QueryDiversifier(self.config.query_diversification, self.config.text_model)
+
+        # Initialize retrieval components based on mode
+        if use_multihop:
+            print("Using DSPy Multi-Hop Retrieval mode")
+            self.multihop_retriever = create_multihop_retriever(
+                hybrid_retriever=self.hybrid_retriever,
+                collection_name=None,  # Set per-query
+                num_hops=num_hops
+            )
+            if multihop_model_path:
+                print(f"Loading optimized model from: {multihop_model_path}")
+                self.multihop_retriever.load(multihop_model_path)
+        else:
+            print("Using standard retrieval mode")
+            self.query_reformulator = QueryReformulator(self.config.text_model)
+            self.query_diversifier = QueryDiversifier(self.config.query_diversification, self.config.text_model)
+
+        # Initialize generation components
         self.answerability_detector = AnswerabilityDetector(self.config.text_model)
         self.response_generator = ResponseGenerator(self.config.text_model)
-        
+
         print("Pipeline initialized successfully!")
     
     def process_query(
@@ -68,44 +97,73 @@ class Pipeline:
             Complete response with metadata (R)
         """
         mode = "retrieval" if retrieval_only else "full pipeline"
-        print(f"Processing query ({mode}): {current_question}")
-        
-        # Phase 1: Context-Aware Query Reformulation
-        print("Phase 1: Query Reformulation...")
-        reformulated_query = self.query_reformulator.cot_rewrite(
-            current_question, conversation_history
-        )
-        print(f"Reformulated query: {reformulated_query}")
-        
-        # Phase 2: Multi-Strategy Query Diversification
-        print("Phase 2: Query Diversification...")
-        query_variants = self.query_diversifier.diversify(reformulated_query)
-        print(f"Generated {len(query_variants)} query variants")
-        
-        # Phase 3: Hybrid Document Retrieval
-        print("Phase 3: Hybrid Retrieval...")
-        candidates = self.hybrid_retriever.hybrid_retrieve(collection_name, query_variants)
-        
-        # Phase 4: Cross-Encoder Reranking
-        print("Phase 4: Reranking...")
-        top_documents = self.hybrid_retriever.rerank_candidates(reformulated_query, candidates)
-        print(f"Selected {len(top_documents)} top documents")
+        retrieval_mode = "multi-hop" if self.use_multihop else "standard"
+        print(f"Processing query ({mode}, {retrieval_mode}): {current_question}")
+
+        # ============================================================
+        # RETRIEVAL: Multi-hop or Standard
+        # ============================================================
+        if self.use_multihop:
+            # DSPy Multi-Hop Retrieval (replaces phases 1-4)
+            print("Running DSPy Multi-Hop Retrieval...")
+            multihop_result = self.multihop_retriever.process_query(
+                current_question=current_question,
+                conversation_history=conversation_history,
+                collection_name=collection_name,
+                retrieval_only=True
+            )
+
+            metadata = multihop_result["pipeline_metadata"]
+            top_documents = metadata["retrieved_documents"]
+            reformulated_query = metadata.get("reformulated_query", current_question)
+            query_variants = metadata.get("query_variants", [])
+            num_candidates = metadata.get("num_candidates", 0)
+
+            print(f"Multi-hop retrieval complete: {len(top_documents)} documents from {metadata.get('num_hops', 3)} hops")
+
+        else:
+            # Standard Retrieval (phases 1-4)
+            # Phase 1: Context-Aware Query Reformulation
+            print("Phase 1: Query Reformulation...")
+            reformulated_query = self.query_reformulator.cot_rewrite(
+                current_question, conversation_history
+            )
+            print(f"Reformulated query: {reformulated_query}")
+
+            # Phase 2: Multi-Strategy Query Diversification
+            print("Phase 2: Query Diversification...")
+            query_variants = self.query_diversifier.diversify(reformulated_query)
+            print(f"Generated {len(query_variants)} query variants")
+
+            # Phase 3: Hybrid Document Retrieval
+            print("Phase 3: Hybrid Retrieval...")
+            candidates = self.hybrid_retriever.hybrid_retrieve(collection_name, query_variants)
+            num_candidates = len(candidates)
+
+            # Phase 4: Cross-Encoder Reranking
+            print("Phase 4: Reranking...")
+            top_documents = self.hybrid_retriever.rerank_candidates(reformulated_query, candidates)
+            print(f"Selected {len(top_documents)} top documents")
 
         # ============================================================
         # RETRIEVAL-ONLY MODE: Skip generation phases (5-6)
         # ============================================================
         if retrieval_only:
             print("Retrieval-only mode: Skipping answerability and generation phases")
-            return {
+            result = {
                 "pipeline_metadata": {
                     "original_question": current_question,
                     "reformulated_query": reformulated_query,
                     "query_variants": query_variants,
-                    "num_candidates": len(candidates),
+                    "num_candidates": num_candidates,
                     "num_top_docs": len(top_documents),
-                    "retrieved_documents": top_documents
+                    "retrieved_documents": top_documents,
+                    "retrieval_mode": retrieval_mode
                 }
             }
+            if self.use_multihop:
+                result["pipeline_metadata"]["hop_details"] = metadata.get("hop_details", [])
+            return result
 
         # ============================================================
         # FULL PIPELINE MODE: Run answerability and generation (5-6)
@@ -121,7 +179,7 @@ class Pipeline:
         response = self.response_generator.generate_response(
             answerability,
             reformulated_query,
-            top_documents,
+            top_documents[:5],  # Pass only top 5 docs for generation
             conversation_history
         )
 
@@ -132,11 +190,15 @@ class Pipeline:
                 "reformulated_query": reformulated_query,
                 "query_variants": query_variants,
                 "answerability": answerability.value,
-                "num_candidates": len(candidates),
+                "num_candidates": num_candidates,
                 "num_top_docs": len(top_documents),
-                "retrieved_documents": top_documents  # Include full document details
+                "retrieved_documents": top_documents,
+                "retrieval_mode": retrieval_mode
             }
         })
+
+        if self.use_multihop:
+            response["pipeline_metadata"]["hop_details"] = metadata.get("hop_details", [])
 
         print("Pipeline processing complete!")
         return response
@@ -239,15 +301,28 @@ class Pipeline:
         return results
 
 
-def create_pipeline(config_path: str = None) -> Pipeline:
+def create_pipeline(
+    config_path: str = None,
+    use_multihop: bool = False,
+    multihop_model_path: Optional[str] = None,
+    num_hops: int = 3
+) -> Pipeline:
     """
     Factory function to create a pipeline instance
-    
+
     Args:
         config_path: Optional path to YAML configuration file
-        
+        use_multihop: If True, use DSPy multi-hop retrieval
+        multihop_model_path: Path to optimized multi-hop model
+        num_hops: Number of retrieval hops (default: 3)
+
     Returns:
         Initialized Pipeline instance
     """
     config = load_config(config_path)
-    return Pipeline(config)
+    return Pipeline(
+        config=config,
+        use_multihop=use_multihop,
+        multihop_model_path=multihop_model_path,
+        num_hops=num_hops
+    )
