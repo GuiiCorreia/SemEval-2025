@@ -80,7 +80,7 @@ class SystemConfig:
         self.text_model = TextModelConfig(
             model_id=os.getenv("TEXT_MODEL_ID", "gemini-3-flash-preview"),
             temperature=float(os.getenv("TEXT_MODEL_TEMPERATURE", "0.1")),
-            max_tokens=int(os.getenv("TEXT_MODEL_MAX_TOKENS", "1500")),
+            max_tokens=int(os.getenv("TEXT_MODEL_MAX_TOKENS", "15000")),
             top_p=float(os.getenv("TEXT_MODEL_TOP_P", "0.9")),
             api_key=os.getenv("GEMINI_API_KEY"),
             provider=os.getenv("TEXT_MODEL_PROVIDER", "gemini")
