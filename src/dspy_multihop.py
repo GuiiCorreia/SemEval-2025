@@ -16,28 +16,117 @@ from dataclasses import dataclass, field
 
 
 class GenerateQueries(dspy.Signature):
-    """Generate 3 diverse search queries to retrieve relevant documents for answering the question."""
+    """Generate 3 diverse search queries to retrieve relevant documents for answering the question.
+
+    DOCUMENT CORPORA (4 domains):
+    - ClapNQ: Subset of Wikipedia pages covering general knowledge topics.
+    - FiQA: StackExchange posts discussing financial advice and questions.
+    - Govt: Crawled .gov and .mil web pages covering parks, NASA, Veteran Affairs, DMV, city services, etc.
+      Contains inter-connected pages on related government topics.
+    - Cloud: Technical documentation pages from a major cloud provider.
+      Contains inter-connected pages covering various aspects of cloud offerings.
+
+    Documents are indexed as passages of 512 tokens with 100 token overlap.
+
+    RETRIEVAL SYSTEM (Hybrid):
+    The system uses hybrid retrieval combining two methods:
+    - BM25 (sparse): Relies on exact keyword/term matching. Queries should include specific
+      terms, entities, and domain vocabulary that appear in target documents.
+    - Dense (semantic): Relies on meaning similarity. Queries should capture the semantic
+      intent even with different wording.
+
+    For optimal retrieval, generate queries that work well for BOTH methods:
+    - Include specific keywords and entities (for BM25)
+    - Capture the semantic meaning clearly (for dense retrieval)
+
+    After retrieval, documents are reranked using a neural reranker (Jina).
+
+    RERANKING QUERIES:
+    In addition to search queries, generate specialized rerank queries:
+    - rerank_query: Used to rerank documents retrieved in the CURRENT hop.
+      Should capture the core intent of what makes a document relevant for this hop.
+      Focus on the specific information need being addressed in this retrieval step.
+    - final_rerank_query: Used to rerank ALL documents aggregated from ALL hops.
+      Should be comprehensive and capture the complete information need.
+      Consider all aspects of the question and conversation to rank the most relevant documents highest.
+
+    Rerank queries should be concise but capture the essential relevance criteria.
+
+    QUESTION TYPES:
+    - Comparative: Asking for comparison of entities, characteristics, or decisions.
+      Example: "What's the difference between effective and marginal tax?"
+    - Composite: Comprises several related or dependent questions.
+      Example: "Am I eligible for a driver's license and how do I apply?"
+    - Explanation: Asking the reason behind something. Example: "Why do I have to do X?"
+    - Factoid: Asking for specific information (date, quantity, name, yes/no).
+      Example: "What is the link to the application portal?"
+    - How-To: Instructions for performing a task. Example: "How do I apply for benefits?"
+    - Keyword: Using keywords, not full sentences (may be ambiguous). Example: "vacation days"
+    - Non-question: Not a question, but a statement or response. Example: "I am in Sacramento"
+    - Opinion: Asking for subjective judgment. Example: "Which color car is the best?"
+    - Summarization: Asking to summarize a process or policy.
+    - Troubleshooting: Finding solutions to issues. Example: "I have error X, what should I do?"
+
+    MULTI-TURN TYPES:
+    - Follow-up: Requests more or related information to continue the conversation.
+    - Clarification: Clarifies user's intent or asks to explain model's previous answer.
+
+    ANSWERABILITY:
+    - Answerable: Can be fully answered from the corpus.
+    - Partially answerable: Only part can be answered from the corpus.
+    - Unanswerable: Cannot be answered from the corpus.
+    - Conversational: Not a question (e.g., "Hello", "Thank you").
+
+    USING NOTES FROM PREVIOUS HOPS:
+    After the first hop, you will receive structured notes from previous retrieval attempts.
+    These notes contain:
+    - Key findings: Facts, entities, and information already retrieved. Use these to avoid
+      redundant queries and to build upon existing context.
+    - Missing info: Specific information still needed. Target your new queries to fill these gaps.
+    - Search suggestions: Concrete query ideas from the previous analysis. These are highly
+      valuable - consider using or adapting them directly.
+
+    Strategy for using notes:
+    1. Read the search_suggestions first - they often contain the most actionable guidance
+    2. Check missing_info to understand what information gaps remain
+    3. Use key_findings to avoid re-searching for already retrieved information
+    4. Generate queries that specifically target the missing information while building on findings
+
+    Generate queries that match the question type and domain terminology."""
 
     question = dspy.InputField(desc="The user's question to answer")
     conversation_history = dspy.InputField(desc="Previous conversation turns for context")
-    notes = dspy.InputField(desc="Accumulated notes from previous retrieval hops")
+    notes = dspy.InputField(desc="Structured notes from previous hops containing key_findings (what was found), missing_info (what's still needed), and search_suggestions (query ideas for this hop)")
 
     query_1 = dspy.OutputField(desc="First search query")
     query_2 = dspy.OutputField(desc="Second search query")
     query_3 = dspy.OutputField(desc="Third search query")
+    rerank_query = dspy.OutputField(desc="Query to rerank documents from this hop")
+    final_rerank_query = dspy.OutputField(desc="Query to rerank ALL documents from all hops combined (used in final aggregation)")
 
 
 class BuildNotes(dspy.Signature):
-    """Analyze retrieved documents and build structured notes to guide the next retrieval hop."""
+    """Analyze retrieved documents and build structured notes to guide the next retrieval hop.
+
+    This module is critical for multi-hop retrieval. Your notes will directly influence
+    the next hop's query generation. Be specific and actionable.
+
+    Your analysis should:
+    1. Identify what relevant information was found in the retrieved documents
+    2. Determine what information is still missing to fully answer the question
+    3. Suggest specific search strategies for the next hop
+
+    The notes you generate will be passed to the query generator for the next hop,
+    so make sure your suggestions are concrete enough to generate effective queries."""
 
     question = dspy.InputField(desc="The user's question to answer")
     queries_used = dspy.InputField(desc="The 3 queries used in this hop")
     retrieved_documents = dspy.InputField(desc="The 10 reranked documents from this hop")
     previous_notes = dspy.InputField(desc="Notes from previous hops")
 
-    key_findings = dspy.OutputField(desc="Key information found that helps answer the question")
-    missing_info = dspy.OutputField(desc="What information is still needed to fully answer")
-    search_suggestions = dspy.OutputField(desc="Suggestions for what to search next")
+    key_findings = dspy.OutputField(desc="Specific facts, entities, or information found that helps answer the question")
+    missing_info = dspy.OutputField(desc="What specific information is still needed to fully answer the question")
+    search_suggestions = dspy.OutputField(desc="Concrete query suggestions for the next hop - include specific terms, entities, or concepts to search for")
 
 
 @dataclass
@@ -76,7 +165,7 @@ class QueryGenerator(dspy.Module):
         notes: str
     ) -> dspy.Prediction:
         """
-        Generate 3 search queries.
+        Generate 3 search queries and rerank queries.
 
         Args:
             question: The user's question
@@ -84,7 +173,7 @@ class QueryGenerator(dspy.Module):
             notes: Accumulated notes from previous hops
 
         Returns:
-            Prediction with query_1, query_2, query_3
+            Prediction with queries, rerank_query, final_rerank_query
         """
         result = self.generate(
             question=question,
@@ -93,7 +182,9 @@ class QueryGenerator(dspy.Module):
         )
 
         return dspy.Prediction(
-            queries=[result.query_1, result.query_2, result.query_3]
+            queries=[result.query_1, result.query_2, result.query_3],
+            rerank_query=result.rerank_query,
+            final_rerank_query=result.final_rerank_query
         )
 
 
@@ -227,13 +318,15 @@ class MultiHopRetriever(dspy.Module):
 
     def _retrieve_and_rerank(
         self,
-        queries: List[str]
+        queries: List[str],
+        rerank_query: str
     ) -> tuple[List[Dict[str, Any]], int]:
         """
         Execute hybrid retrieval with 3 queries and rerank results.
 
         Args:
             queries: List of 3 search queries
+            rerank_query: Query to use for reranking the retrieved documents
 
         Returns:
             Tuple of (reranked_documents, total_candidates_count)
@@ -246,8 +339,7 @@ class MultiHopRetriever(dspy.Module):
 
         candidates_count = len(candidates)
 
-        # Rerank with concatenated queries as context
-        rerank_query = " | ".join(queries)
+        # Rerank with the generated rerank query
         reranked = self.hybrid_retriever.rerank_candidates(rerank_query, candidates)
 
         # Return top documents
@@ -279,6 +371,9 @@ class MultiHopRetriever(dspy.Module):
         print("User question: ", question)
         print("Conversation History: ", formatted_history)
 
+        # Store final_rerank_query from last hop
+        final_rerank_query = None
+
         # Execute hops
         for hop_num in range(1, self.num_hops + 1):
             print(f"\n{'='*50}")
@@ -289,7 +384,7 @@ class MultiHopRetriever(dspy.Module):
                 # Get accumulated notes
                 notes_str = self._format_notes(result.hop_results)
 
-                # Generate 3 queries
+                # Generate 3 queries + rerank queries
                 print("Generating queries...")
                 query_result = self.query_generator(
                     question=question,
@@ -297,6 +392,11 @@ class MultiHopRetriever(dspy.Module):
                     notes=notes_str
                 )
                 queries = query_result.queries
+                rerank_query = query_result.rerank_query
+
+                # Store final_rerank_query from last hop
+                if hop_num == self.num_hops:
+                    final_rerank_query = query_result.final_rerank_query
 
                 # Filter out None queries
                 valid_queries = [q for q in queries if q is not None]
@@ -309,10 +409,13 @@ class MultiHopRetriever(dspy.Module):
 
                 for i, q in enumerate(queries, 1):
                     print(f"  Query {i}: {q}")
+                print(f"  Rerank query: {rerank_query}")
+                if final_rerank_query:
+                    print(f"  Final rerank query: {final_rerank_query}")
 
-                # Retrieve and rerank
+                # Retrieve and rerank using generated rerank_query
                 print("Retrieving and reranking...")
-                reranked_docs, candidates_count = self._retrieve_and_rerank(queries)
+                reranked_docs, candidates_count = self._retrieve_and_rerank(queries, rerank_query)
                 print(f"  Candidates: {candidates_count} -> Reranked: {len(reranked_docs)}")
 
                 # Build notes (except for last hop)
@@ -349,16 +452,15 @@ class MultiHopRetriever(dspy.Module):
         aggregated_docs = self._aggregate_documents(result.hop_results)
         print(f"\nTotal unique documents: {len(aggregated_docs)}")
 
-        # Final reranking using all generated queries
-        if aggregated_docs and result.all_queries:
-            print("Final reranking...")
-            rerank_query = " | ".join(result.all_queries)
-            reranked_final = self.hybrid_retriever.rerank_candidates(rerank_query, aggregated_docs)
+        # Final reranking using the generated final_rerank_query
+        if aggregated_docs and final_rerank_query:
+            print(f"Final reranking with: {final_rerank_query}")
+            reranked_final = self.hybrid_retriever.rerank_candidates(final_rerank_query, aggregated_docs)
             result.final_documents = reranked_final
             print(f"Final documents after rerank: {len(result.final_documents)}")
         elif aggregated_docs:
-            # No queries but have docs - use original question for rerank
-            print("Final reranking with original question...")
+            # Fallback to original question if no final_rerank_query
+            print("Final reranking with original question (fallback)...")
             reranked_final = self.hybrid_retriever.rerank_candidates(question, aggregated_docs)
             result.final_documents = reranked_final
             print(f"Final documents after rerank: {len(result.final_documents)}")

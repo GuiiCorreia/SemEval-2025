@@ -41,6 +41,8 @@ class OptimizationSample:
     answerability: str
     question_types: List[str] = field(default_factory=list)
     reference_doc_ids: List[str] = field(default_factory=list)
+    ground_truth_response: str = ""
+    targets: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -83,6 +85,16 @@ def _entry_to_sample(entry: Dict[str, Any]) -> OptimizationSample:
     # Reference document IDs
     ref_doc_ids = [doc.get('document_id') for doc in documents if doc.get('document_id')]
 
+    # Ground truth response from targets
+    ground_truth_response = ""
+    targets = entry.get('targets', [])
+    if targets:
+        # Get first agent response from targets
+        for target in targets:
+            if target.get('speaker') == 'agent':
+                ground_truth_response = target.get('text', '')
+                break
+
     return OptimizationSample(
         task_id=entry.get('task_id', ''),
         collection=entry.get('Collection', 'unknown'),
@@ -91,7 +103,9 @@ def _entry_to_sample(entry: Dict[str, Any]) -> OptimizationSample:
         documents=documents,
         answerability=answerability,
         question_types=question_types,
-        reference_doc_ids=ref_doc_ids
+        reference_doc_ids=ref_doc_ids,
+        ground_truth_response=ground_truth_response,
+        targets=targets
     )
 
 

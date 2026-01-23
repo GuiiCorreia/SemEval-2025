@@ -29,5 +29,6 @@ dependencies = [
     "sentence-transformers>=5.1.2",
     "rank-bm25>=0.2.2",
     "tenacity>=8.5.0",
-    "dspy>=3.1.0",
+    "dspy==3.1.2",
+    "mlflow>=3.8.1",
 ]

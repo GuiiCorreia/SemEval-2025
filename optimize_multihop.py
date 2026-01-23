@@ -20,6 +20,15 @@ from collections import defaultdict
 import dspy
 from dspy import GEPA
 from dotenv import load_dotenv
+import mlflow
+
+# Configure MLflow tracking
+mlflow.dspy.autolog(
+    log_compiles=True,
+    log_evals=True,
+    log_traces_from_compile=True
+)
+mlflow.set_experiment("multihop-rag-optimization")
 
 from src.config import load_config
 from src.embeddings import EmbeddingService
@@ -34,30 +43,33 @@ load_dotenv()
 # API KEYS
 # =============================================================================
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY not found in environment variables")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY not found in environment variables")
 
 
 # =============================================================================
 # MODEL CONFIGURATION
 # =============================================================================
 
-STUDENT_MODEL = "gemini/gemini-3-flash-preview"
-TEACHER_MODEL = "gemini/gemini-3-flash-preview"
-JUDGE_MODEL = "gemini/gemini-3-flash-preview"
+# DeepInfra OpenAI-compatible endpoint
+DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
+
+STUDENT_MODEL = "openai/openai/gpt-oss-120b"
+TEACHER_MODEL = "openai/openai/gpt-oss-120b"
+JUDGE_MODEL = "openai/openai/gpt-oss-120b"
 
 STUDENT_TEMPERATURE = 0.4
 TEACHER_TEMPERATURE = 0.4
 JUDGE_TEMPERATURE = 0.2
 
-MAX_TOKENS = 8000
+MAX_TOKENS = 10000
 
 # Create LM instances (cache disabled for optimization)
-lm_student = dspy.LM(STUDENT_MODEL, temperature=STUDENT_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=GEMINI_API_KEY, cache=False)
-lm_teacher = dspy.LM(TEACHER_MODEL, temperature=TEACHER_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=GEMINI_API_KEY, cache=False)
-lm_judge = dspy.LM(JUDGE_MODEL, temperature=JUDGE_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=GEMINI_API_KEY, cache=False)
+lm_student = dspy.LM(STUDENT_MODEL, temperature=STUDENT_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=OPENAI_API_KEY, base_url=DEEPINFRA_BASE_URL, cache=False)
+lm_teacher = dspy.LM(TEACHER_MODEL, temperature=TEACHER_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=OPENAI_API_KEY, base_url=DEEPINFRA_BASE_URL, cache=False)
+lm_judge = dspy.LM(JUDGE_MODEL, temperature=JUDGE_TEMPERATURE, max_tokens=MAX_TOKENS, api_key=OPENAI_API_KEY, base_url=DEEPINFRA_BASE_URL, cache=False)
 
 # Configure default LM (student)
 dspy.configure(lm=lm_student)
@@ -76,6 +88,34 @@ class TrainingSample:
     conversation_history: List[Dict[str, str]]
     reference_doc_ids: List[str]
     reference_docs: List[Dict[str, Any]]
+    answerability: str
+    question_types: List[str]
+    ground_truth_response: str = ""
+
+
+# Collection descriptions for context
+COLLECTION_INFO = {
+    "mt-rag-clapnq-elser-512-100-20240503": {
+        "name": "ClapNQ",
+        "domain": "General knowledge (Wikipedia-based)",
+        "description": "Questions based on Wikipedia articles covering diverse topics"
+    },
+    "mt-rag-fiqa-beir-elser-512-100-20240501": {
+        "name": "FiQA",
+        "domain": "Financial",
+        "description": "Financial question answering from forums and financial documents"
+    },
+    "mt-rag-govt-elser-512-100-20240611": {
+        "name": "Government",
+        "domain": "Government services",
+        "description": "Questions about government services, policies, and procedures"
+    },
+    "mt-rag-ibmcloud-elser-512-100-20240502": {
+        "name": "IBM Cloud",
+        "domain": "Technical documentation",
+        "description": "Technical questions about IBM Cloud services and documentation"
+    }
+}
 
 
 def load_dataset(filepath: str) -> List[TrainingSample]:
@@ -90,7 +130,10 @@ def load_dataset(filepath: str) -> List[TrainingSample]:
                 question=entry.get('question', ''),
                 conversation_history=entry.get('conversation_history', []),
                 reference_doc_ids=entry.get('reference_doc_ids', []),
-                reference_docs=entry.get('documents', [])
+                reference_docs=entry.get('documents', []),
+                answerability=entry.get('answerability', 'UNKNOWN'),
+                question_types=entry.get('question_types', []),
+                ground_truth_response=entry.get('ground_truth_response', '')
             )
             samples.append(sample)
     return samples
@@ -168,7 +211,7 @@ class LLMJudge(dspy.Module):
         for i, doc in enumerate(docs, 1):
             doc_id = doc.get('document_id', 'N/A')
             title = doc.get('title', 'Untitled')
-            text = doc.get('text', '')[:500]
+            text = doc.get('text', '')[:5000]
             formatted.append(f"[{label} {i}] ID: {doc_id}\nTitle: {title}\n{text}")
 
         return "\n\n".join(formatted)
@@ -178,7 +221,7 @@ class LLMJudge(dspy.Module):
 # METRIC WITH FEEDBACK FOR GEPA
 # =============================================================================
 
-def create_metric_with_feedback(judge: LLMJudge):
+def create_metric_with_feedback():
     """Create a metric function with feedback for GEPA optimization."""
 
     def metric_with_feedback(example, prediction, trace=None, pred_name=None, pred_trace=None):
@@ -191,25 +234,63 @@ def create_metric_with_feedback(judge: LLMJudge):
         reference_ids = set(example.reference_doc_ids)
         question = example.question
 
+        # Get question dimensions
+        collection = getattr(example, 'collection', 'unknown')
+        answerability = getattr(example, 'answerability', 'UNKNOWN')
+        question_types = getattr(example, 'question_types', [])
+        conversation_history = getattr(example, 'conversation_history', [])
+        ground_truth_response = getattr(example, 'ground_truth_response', '')
+
+        # Get collection info
+        coll_info = COLLECTION_INFO.get(collection, {})
+        dataset_name = coll_info.get('name', collection)
+        dataset_domain = coll_info.get('domain', 'Unknown')
+
         # Calculate recall
         overlap = retrieved_ids & reference_ids
-        recall = len(overlap) / len(reference_ids) if reference_ids else 0.0
+        missing_ids = reference_ids - retrieved_ids
+        recall = len(overlap) / len(reference_ids) if reference_ids else 1.0
 
-        # Use LLM judge for evaluation
-        with dspy.context(lm=lm_judge):
-            judge_result = judge(
-                question=question,
-                reference_docs=reference_docs,
-                retrieved_docs=retrieved_docs
-            )
+        # Determine if multi-turn
+        is_multi_turn = len(conversation_history) > 0
+        turn_number = len(conversation_history) // 2 + 1
 
-        # Score based on judge verdict
-        judge_score = 1.0 if judge_result.passed else 0.0
+        # Build structured feedback
+        feedback_parts = [
+            "QUESTION DIMENSIONS:",
+            f"  Dataset: {dataset_name} ({dataset_domain})",
+            f"  Question Types: {', '.join(question_types) if question_types else 'Not specified'}",
+            f"  Answerability: {answerability}",
+            f"  Turn: {turn_number} ({'Multi-turn' if is_multi_turn else 'First turn'})",
+            "",
+            "QUESTION:",
+            f"  {question}",
+            "",
+            "EXPECTED RESPONSE (Ground Truth):",
+            f"  {ground_truth_response[:2000] if ground_truth_response else 'Not available'}",
+            "",
+            "RETRIEVAL RESULT:",
+            f"  Recall: {recall:.1%} ({len(overlap)}/{len(reference_ids)} documents)",
+        ]
 
-        # Build feedback with recall info
-        feedback = f"Recall: {len(overlap)}/{len(reference_ids)} ({recall:.1%})\n{judge_result.feedback}"
+        if missing_ids:
+            feedback_parts.append("")
+            feedback_parts.append(f"MISSING DOCUMENTS ({len(missing_ids)}):")
 
-        return dspy.Prediction(score=judge_score, feedback=feedback, recall=recall)
+            for doc in reference_docs:
+                doc_id = doc.get('document_id', '')
+                if doc_id in missing_ids:
+                    title = doc.get('title', 'Untitled')
+                    text_preview = doc.get('text', '')[:3000]
+                    feedback_parts.append(f"\n  [{doc_id}]")
+                    feedback_parts.append(f"  Title: {title}")
+                    feedback_parts.append(f"  Content: {text_preview}...")
+        else:
+            feedback_parts.append("")
+            feedback_parts.append("All reference documents retrieved successfully.")
+
+        feedback = "\n".join(feedback_parts)
+        return dspy.Prediction(score=recall, feedback=feedback)
 
     return metric_with_feedback
 
@@ -238,9 +319,8 @@ def run_optimization(
         num_hops=3
     )
 
-    # Create judge and metric
-    judge = LLMJudge()
-    metric = create_metric_with_feedback(judge)
+    # Create metric
+    metric = create_metric_with_feedback()
 
     # Convert samples to dspy.Example format
     train_set = []
@@ -250,7 +330,11 @@ def run_optimization(
             conversation_history=sample.conversation_history,
             reference_doc_ids=sample.reference_doc_ids,
             reference_docs=sample.reference_docs,
-            task_id=sample.task_id
+            task_id=sample.task_id,
+            collection=sample.collection,
+            answerability=sample.answerability,
+            question_types=sample.question_types,
+            ground_truth_response=sample.ground_truth_response
         ).with_inputs('question', 'conversation_history')
         train_set.append(ex)
 
@@ -261,7 +345,11 @@ def run_optimization(
             conversation_history=sample.conversation_history,
             reference_doc_ids=sample.reference_doc_ids,
             reference_docs=sample.reference_docs,
-            task_id=sample.task_id
+            task_id=sample.task_id,
+            collection=sample.collection,
+            answerability=sample.answerability,
+            question_types=sample.question_types,
+            ground_truth_response=sample.ground_truth_response
         ).with_inputs('question', 'conversation_history')
         val_set.append(ex)
 
@@ -275,7 +363,8 @@ def run_optimization(
         num_threads=num_threads,
         track_stats=True,
         reflection_minibatch_size=3,
-        reflection_lm=lm_teacher
+        reflection_lm=lm_teacher,
+        use_mlflow=True
     )
 
     # Run optimization
@@ -349,6 +438,7 @@ def main():
     print(f"Train file: {args.train_file}")
     print(f"Val file: {args.val_file}")
     print(f"Output: {args.output}")
+    print(f"Base URL: {DEEPINFRA_BASE_URL}")
     print(f"Student: {STUDENT_MODEL}")
     print(f"Teacher: {TEACHER_MODEL}")
     print(f"Judge: {JUDGE_MODEL}")

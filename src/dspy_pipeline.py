@@ -71,7 +71,8 @@ class IntegratedRAGPipeline:
                 "gemini/gemini-3-flash-preview",
                 api_key=api_key,
                 temperature=0.2,
-                max_tokens=2000
+                max_tokens=2000,
+                cache=False,
             )
 
         if generation_lm is None and api_key:
@@ -79,7 +80,8 @@ class IntegratedRAGPipeline:
                 "gemini/gemini-3-pro-preview",
                 api_key=api_key,
                 temperature=0.4,
-                max_tokens=4000
+                max_tokens=10000,
+                cache=False,
             )
 
         self.classification_lm = classification_lm

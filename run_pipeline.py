@@ -444,8 +444,14 @@ def main():
     parser.add_argument(
         '--dspy-model',
         type=str,
-        default='gemini/gemini-3-flash-preview',
-        help='LLM model to use for DSPy multi-hop (e.g., gemini/gemini-2.5-flash-preview, groq/llama-3.3-70b-versatile)'
+        default='openai/openai/gpt-oss-120b',
+        help='LLM model to use for DSPy modes (e.g., openai/gpt-oss-120b, gemini/gemini-3-flash-preview)'
+    )
+    parser.add_argument(
+        '--dspy-base-url',
+        type=str,
+        default='https://api.deepinfra.com/v1/openai',
+        help='Base URL for OpenAI-compatible API (e.g., DeepInfra, Together, etc.)'
     )
     parser.add_argument(
         '--dspy-full',
@@ -481,21 +487,20 @@ def main():
     # Check if DSPy full pipeline mode is enabled
     if args.dspy_full:
         print("Initializing DSPy Full Pipeline (Retrieval + Classification + Generation)...")
-        print(f"  Retrieval model: {args.dspy_model}")
+        print(f"  Model: {args.dspy_model}")
+        print(f"  Base URL: {args.dspy_base_url}")
         print(f"  Hops: {args.num_hops}")
-        print(f"  Classification: gemini/gemini-3-flash-preview")
-        print(f"  Generation: gemini/gemini-3-pro-preview")
 
         try:
             import dspy
 
             # Get API key
-            api_key = os.getenv('GEMINI_API_KEY')
+            api_key = os.getenv('OPENAI_API_KEY')
             if not api_key:
-                raise ValueError("GEMINI_API_KEY not found in environment")
+                raise ValueError("OPENAI_API_KEY not found in environment")
 
             # Configure DSPy with retrieval model
-            lm = dspy.LM(args.dspy_model, api_key=api_key, temperature=0.4, max_tokens=8000)
+            lm = dspy.LM(args.dspy_model, api_key=api_key, base_url=args.dspy_base_url, temperature=0.4, max_tokens=10000)
             dspy.configure(lm=lm)
 
             # Initialize retrieval infrastructure
@@ -540,25 +545,19 @@ def main():
     if args.dspy_multihop:
         print("Initializing DSPy Multi-Hop RAG Pipeline...")
         print(f"  Model: {args.dspy_model}")
+        print(f"  Base URL: {args.dspy_base_url}")
         print(f"  Hops: {args.num_hops}")
 
         try:
             # Configure DSPy
             import dspy
 
-            # Get API key based on model provider
-            if args.dspy_model.startswith('gemini/'):
-                api_key = os.getenv('GEMINI_API_KEY')
-                if not api_key:
-                    raise ValueError("GEMINI_API_KEY not found in environment")
-            elif args.dspy_model.startswith('groq/'):
-                api_key = os.getenv('GROQ_API_KEY')
-                if not api_key:
-                    raise ValueError("GROQ_API_KEY not found in environment")
-            else:
-                api_key = os.getenv('OPENAI_API_KEY')
+            # Get API key
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not found in environment")
 
-            lm = dspy.LM(args.dspy_model, api_key=api_key, temperature=0.4, max_tokens=8000)
+            lm = dspy.LM(args.dspy_model, api_key=api_key, base_url=args.dspy_base_url, temperature=0.4, max_tokens=10000)
             dspy.configure(lm=lm)
 
             # Initialize retrieval infrastructure
