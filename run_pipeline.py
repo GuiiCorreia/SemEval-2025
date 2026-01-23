@@ -86,7 +86,7 @@ def run_retrieval_experiment(
 
         try:
             # Get collection for this query (use query's collection or fall back to default)
-            raw_collection = query_item.get('Collection', default_collection)
+            raw_collection = query_item.get('Collection') or query_item.get('collection') or default_collection
             collection_name = resolve_collection_name(raw_collection)
 
             # Extract conversation history from query item
@@ -150,6 +150,8 @@ def run_retrieval_experiment(
             continue
 
     # Save results
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Saving {len(results)} results to {output_file}...")
     with open(output_file, 'w', encoding='utf-8') as f:
         for result in results:
@@ -178,7 +180,7 @@ def run_generation_experiment(
 
         try:
             # Get collection for this query (use query's collection or fall back to default)
-            raw_collection = query_item.get('Collection', default_collection)
+            raw_collection = query_item.get('Collection') or query_item.get('collection') or default_collection
             collection_name = resolve_collection_name(raw_collection)
 
             # Extract conversation history
@@ -243,6 +245,8 @@ def run_generation_experiment(
             continue
 
     # Save results
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Saving {len(results)} results to {output_file}...")
     with open(output_file, 'w', encoding='utf-8') as f:
         for result in results:
@@ -276,7 +280,7 @@ def run_multihop_full_experiment(
 
         try:
             # Get collection for this query
-            raw_collection = query_item.get('Collection', default_collection)
+            raw_collection = query_item.get('Collection') or query_item.get('collection') or default_collection
             collection_name = resolve_collection_name(raw_collection)
 
             # Extract conversation history
@@ -364,11 +368,15 @@ def run_multihop_full_experiment(
 
     # Save Task A results
     print(f"\nSaving {len(results_retrieval)} Task A results to {output_retrieval}...")
+    output_path = Path(output_retrieval)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_retrieval, 'w', encoding='utf-8') as f:
         for result in results_retrieval:
             f.write(json.dumps(result) + '\n')
 
     # Save Task C results
+    output_path = Path(output_generation)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Saving {len(results_generation)} Task C results to {output_generation}...")
     with open(output_generation, 'w', encoding='utf-8') as f:
         for result in results_generation:
@@ -399,7 +407,7 @@ def run_dspy_full_experiment(
 
         try:
             # Get collection for this query
-            raw_collection = query_item.get('Collection', default_collection)
+            raw_collection = query_item.get('Collection') or query_item.get('collection') or default_collection
             collection_name = resolve_collection_name(raw_collection)
 
             # Extract conversation history
@@ -465,6 +473,8 @@ def run_dspy_full_experiment(
             continue
 
     # Save results
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving {len(results)} results to {output_file}...")
     with open(output_file, 'w', encoding='utf-8') as f:
         for result in results:
