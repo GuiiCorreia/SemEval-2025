@@ -147,6 +147,24 @@ def run_retrieval_experiment(
 
         except Exception as e:
             print(f"Error processing query {i}: {e}")
+
+            # Fallback: save record with empty contexts instead of skipping
+            raw_collection = query_item.get('Collection') or query_item.get('collection') or default_collection
+            collection_name = resolve_collection_name(raw_collection) or 'unknown'
+            conversation_history = query_item.get('input', [])
+
+            result = {
+                'Collection': collection_name,
+                'input': conversation_history,
+                'contexts': []
+            }
+            if 'conversation_id' in query_item:
+                result['conversation_id'] = query_item['conversation_id']
+            if 'task_id' in query_item:
+                result['task_id'] = query_item['task_id']
+            results.append(result)
+
+            print(f"  -> Fallback record saved for query {i}")
             continue
 
     # Save results
@@ -242,6 +260,48 @@ def run_generation_experiment(
 
         except Exception as e:
             print(f"Error processing query {i}: {e}")
+
+            # Fallback: try retrieval-only, then save with fallback response
+            fallback_response = 'I apologize, but I was unable to process your request due to a technical error.'
+            retrieval_results = []
+
+            try:
+                # Try retrieval-only as fallback
+                response = pipeline.process_query(
+                    current_question=current_question,
+                    conversation_history=conversation_history,
+                    collection_name=collection_name,
+                    retrieval_only=True
+                )
+                retrieval_results = response.get('pipeline_metadata', {}).get('retrieved_documents', [])
+                print(f"  -> Retrieval fallback succeeded: {len(retrieval_results)} docs")
+            except Exception as e2:
+                print(f"  -> Retrieval fallback also failed: {e2}")
+
+            # Build result with whatever we have
+            retrieved_docs = []
+            for doc in retrieval_results[:5]:
+                retrieved_docs.append({
+                    'document_id': doc.get('document_id', ''),
+                    'score': doc.get('final_score', doc.get('score', 1.0)),
+                    'text': doc.get('text', ''),
+                    'title': doc.get('title', ''),
+                    'source': doc.get('source', '')
+                })
+
+            result = {
+                'Collection': collection_name,
+                'input': conversation_history,
+                'contexts': retrieved_docs,
+                'predictions': [{'text': fallback_response}]
+            }
+            if 'conversation_id' in query_item:
+                result['conversation_id'] = query_item['conversation_id']
+            if 'task_id' in query_item:
+                result['task_id'] = query_item['task_id']
+            results.append(result)
+
+            print(f"  -> Fallback record saved for query {i}")
             continue
 
     # Save results
@@ -266,6 +326,11 @@ def run_multihop_full_experiment(
 
     This is more efficient than running retrieval and generation separately
     since it processes each query only once.
+
+    Error handling strategy:
+    - If retrieval succeeds but generation fails, keep retrieved docs and use fallback response
+    - If retrieval fails completely, use empty contexts and fallback response
+    - Never skip a record - always save something
     """
     print(f"Running full pipeline experiment on {len(queries)} queries...")
     print(f"  Task A output (10 docs): {output_retrieval}")
@@ -273,98 +338,120 @@ def run_multihop_full_experiment(
 
     results_retrieval = []  # Task A: 10 docs
     results_generation = []  # Task C: 5 docs + predictions
+    fallback_response = 'I apologize, but I was unable to process your request due to a technical error.'
 
     for i, query_item in enumerate(queries):
         if i % 10 == 0:
             print(f"Processing query {i+1}/{len(queries)}...")
 
-        try:
-            # Get collection for this query
-            raw_collection = query_item.get('Collection') or query_item.get('collection') or default_collection
-            collection_name = resolve_collection_name(raw_collection)
+        # Extract common fields (safe, no API calls)
+        raw_collection = query_item.get('Collection') or query_item.get('collection') or default_collection
+        collection_name = resolve_collection_name(raw_collection) or 'unknown'
+        conversation_history = query_item.get('input', [])
 
-            # Extract conversation history
-            conversation_history = []
-            if 'input' in query_item:
-                conversation_history = query_item['input']
+        current_question = query_item.get('text', '')
+        if not current_question and conversation_history:
+            for msg in reversed(conversation_history):
+                if msg.get('speaker') == 'user':
+                    current_question = msg.get('text', '')
+                    break
 
-            # Get current question
-            current_question = query_item.get('text', '')
-            if not current_question and conversation_history:
-                for msg in reversed(conversation_history):
-                    if msg.get('speaker') == 'user':
-                        current_question = msg.get('text', '')
-                        break
+        # Initialize results with defaults
+        retrieval_results = []
+        response_text = fallback_response
+        retrieval_success = False
 
-            if not current_question:
-                print(f"Warning: No question found for query {i}")
-                continue
+        # Skip if no question found
+        if not current_question:
+            print(f"Warning: No question found for query {i}, using fallback")
+        else:
+            # Try to run the full pipeline
+            try:
+                response = pipeline.process_query(
+                    current_question=current_question,
+                    conversation_history=conversation_history,
+                    collection_name=collection_name,
+                    retrieval_only=False  # Full pipeline
+                )
 
-            # Run full pipeline (retrieval + generation) ONCE
-            response = pipeline.process_query(
-                current_question=current_question,
-                conversation_history=conversation_history,
-                collection_name=collection_name,
-                retrieval_only=False  # Full pipeline
-            )
+                # Extract retrieval results (even if generation failed later)
+                retrieval_results = response.get('pipeline_metadata', {}).get('retrieved_documents', [])
+                retrieval_success = len(retrieval_results) > 0
 
-            # Get retrieved documents
-            retrieval_results = response.get('pipeline_metadata', {}).get('retrieved_documents', [])
+                # Extract response text (may be empty if generation failed)
+                response_text = response.get('response_text', '') or fallback_response
 
-            # === Task A: Retrieval (10 docs) ===
-            docs_task_a = []
-            for doc in retrieval_results[:10]:
-                docs_task_a.append({
-                    'document_id': doc.get('document_id', ''),
-                    'score': doc.get('final_score', doc.get('score', 1.0)),
-                    'text': doc.get('text', ''),
-                    'title': doc.get('title', ''),
-                    'source': doc.get('source', '')
-                })
+            except Exception as e:
+                print(f"Error in full pipeline for query {i}: {e}")
+                import traceback
+                traceback.print_exc()
 
-            result_a = {
-                'Collection': collection_name,
-                'input': conversation_history,
-                'contexts': docs_task_a
-            }
-            if 'conversation_id' in query_item:
-                result_a['conversation_id'] = query_item['conversation_id']
-            if 'task_id' in query_item:
-                result_a['task_id'] = query_item['task_id']
+                # Try retrieval-only as fallback
+                try:
+                    print(f"  -> Attempting retrieval-only fallback...")
+                    response = pipeline.process_query(
+                        current_question=current_question,
+                        conversation_history=conversation_history,
+                        collection_name=collection_name,
+                        retrieval_only=True  # Only retrieval
+                    )
+                    retrieval_results = response.get('pipeline_metadata', {}).get('retrieved_documents', [])
+                    retrieval_success = len(retrieval_results) > 0
+                    if retrieval_success:
+                        print(f"  -> Retrieval fallback succeeded: {len(retrieval_results)} docs")
+                except Exception as e2:
+                    print(f"  -> Retrieval fallback also failed: {e2}")
 
-            results_retrieval.append(result_a)
+        # === Task A: Retrieval (10 docs) ===
+        docs_task_a = []
+        for doc in retrieval_results[:10]:
+            docs_task_a.append({
+                'document_id': doc.get('document_id', ''),
+                'score': doc.get('final_score', doc.get('score', 1.0)),
+                'text': doc.get('text', ''),
+                'title': doc.get('title', ''),
+                'source': doc.get('source', '')
+            })
 
-            # === Task C: RAG (5 docs + predictions) ===
-            docs_task_c = []
-            for doc in retrieval_results[:5]:
-                docs_task_c.append({
-                    'document_id': doc.get('document_id', ''),
-                    'score': doc.get('final_score', doc.get('score', 1.0)),
-                    'text': doc.get('text', ''),
-                    'title': doc.get('title', ''),
-                    'source': doc.get('source', '')
-                })
+        result_a = {
+            'Collection': collection_name,
+            'input': conversation_history,
+            'contexts': docs_task_a
+        }
+        if 'conversation_id' in query_item:
+            result_a['conversation_id'] = query_item['conversation_id']
+        if 'task_id' in query_item:
+            result_a['task_id'] = query_item['task_id']
+        results_retrieval.append(result_a)
 
-            result_c = {
-                'Collection': collection_name,
-                'input': conversation_history,
-                'contexts': docs_task_c,
-                'predictions': [{
-                    'text': response.get('response_text', '')
-                }]
-            }
-            if 'conversation_id' in query_item:
-                result_c['conversation_id'] = query_item['conversation_id']
-            if 'task_id' in query_item:
-                result_c['task_id'] = query_item['task_id']
+        # === Task C: RAG (5 docs + predictions) ===
+        docs_task_c = []
+        for doc in retrieval_results[:5]:
+            docs_task_c.append({
+                'document_id': doc.get('document_id', ''),
+                'score': doc.get('final_score', doc.get('score', 1.0)),
+                'text': doc.get('text', ''),
+                'title': doc.get('title', ''),
+                'source': doc.get('source', '')
+            })
 
-            results_generation.append(result_c)
+        result_c = {
+            'Collection': collection_name,
+            'input': conversation_history,
+            'contexts': docs_task_c,
+            'predictions': [{
+                'text': response_text
+            }]
+        }
+        if 'conversation_id' in query_item:
+            result_c['conversation_id'] = query_item['conversation_id']
+        if 'task_id' in query_item:
+            result_c['task_id'] = query_item['task_id']
+        results_generation.append(result_c)
 
-        except Exception as e:
-            print(f"Error processing query {i}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
+        # Log if fallback was used
+        if not retrieval_success or response_text == fallback_response:
+            print(f"  -> Query {i}: retrieval={'OK' if retrieval_success else 'FALLBACK'}, generation={'OK' if response_text != fallback_response else 'FALLBACK'}")
 
     # Save Task A results
     print(f"\nSaving {len(results_retrieval)} Task A results to {output_retrieval}...")
@@ -470,6 +557,27 @@ def run_dspy_full_experiment(
             print(f"Error processing query {i}: {e}")
             import traceback
             traceback.print_exc()
+
+            # Fallback: save record with empty contexts and default response
+            raw_collection = query_item.get('Collection') or query_item.get('collection') or default_collection
+            collection_name = resolve_collection_name(raw_collection) or 'unknown'
+            conversation_history = query_item.get('input', [])
+
+            result = {
+                'Collection': collection_name,
+                'input': conversation_history,
+                'contexts': [],
+                'predictions': [{
+                    'text': 'I apologize, but I was unable to process your request due to a technical error.'
+                }]
+            }
+            if 'conversation_id' in query_item:
+                result['conversation_id'] = query_item['conversation_id']
+            if 'task_id' in query_item:
+                result['task_id'] = query_item['task_id']
+            results.append(result)
+
+            print(f"  -> Fallback record saved for query {i}")
             continue
 
     # Save results
